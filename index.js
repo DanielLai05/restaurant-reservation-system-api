@@ -57,6 +57,48 @@ function authenticateToken(req, res, next) {
   })
 }
 
+// Middleware: Verify Staff Token
+function authenticateStaffToken(req, res, next) {
+  const authHeader = req.headers['authorization']
+  const token = authHeader && authHeader.split(' ')[1]
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' })
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' })
+    }
+    if (user.type !== 'staff') {
+      return res.status(403).json({ error: 'Staff access required' })
+    }
+    req.staff = user
+    next()
+  })
+}
+
+// Middleware: Verify Admin Token
+function authenticateAdminToken(req, res, next) {
+  const authHeader = req.headers['authorization']
+  const token = authHeader && authHeader.split(' ')[1]
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' })
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' })
+    }
+    if (user.type !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' })
+    }
+    req.admin = user
+    next()
+  })
+}
+
 // ============================================
 // AUTH ROUTES
 // ============================================
@@ -65,12 +107,6 @@ function authenticateToken(req, res, next) {
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { firebase_uid, first_name, last_name, email, phone } = req.body
-
-    console.log('Register request:', { firebase_uid, first_name, last_name, email, phone })
-
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' })
-    }
 
     // Check if customer already exists
     const existingUser = await pool.query(
@@ -82,16 +118,15 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Email already registered' })
     }
 
-    // Insert new customer (password handled by Firebase, so set to NULL)
+    // Insert new customer (password handled by Firebase)
     const result = await pool.query(
-      `INSERT INTO customer (firebase_uid, first_name, last_name, email, phone, password)
-       VALUES ($1, $2, $3, $4, $5, NULL)
+      `INSERT INTO customer (firebase_uid, first_name, last_name, email, phone)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, first_name, last_name, email, phone, created_at`,
-      [firebase_uid || null, first_name || '', last_name || '', email, phone || null]
+      [firebase_uid, first_name, last_name, email, phone || null]
     )
 
     const customer = result.rows[0]
-    console.log('Customer created:', customer.id)
 
     // Generate token
     const token = jwt.sign(
@@ -114,7 +149,7 @@ app.post('/api/auth/register', async (req, res) => {
     })
   } catch (error) {
     console.error('Registration error:', error)
-    res.status(500).json({ error: 'Internal server error: ' + error.message })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -123,41 +158,25 @@ app.post('/api/auth/sync-user', async (req, res) => {
   try {
     const { email, first_name, last_name, phone } = req.body
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' })
-    }
-
     // Check if customer exists
     const existingUser = await pool.query(
       'SELECT id FROM customer WHERE email = $1',
       [email]
     )
 
-    if (existingUser.rows.length > 0) {
-      // User already exists, update their info
+    if (existingUser.rows.length === 0) {
+      // Create new customer if not exists
       await pool.query(
-        `UPDATE customer 
-         SET first_name = COALESCE($1, first_name),
-             last_name = COALESCE($2, last_name),
-             phone = COALESCE($3, phone)
-         WHERE email = $4`,
-        [first_name || '', last_name || '', phone || null, email]
+        `INSERT INTO customer (email, first_name, last_name, phone)
+         VALUES ($1, $2, $3, $4)`,
+        [email, first_name || '', last_name || '', phone || null]
       )
-      return res.json({ message: 'User updated successfully', existing: true })
     }
 
-    // Create new customer
-    const result = await pool.query(
-      `INSERT INTO customer (firebase_uid, email, first_name, last_name, phone)
-       VALUES (NULL, $1, $2, $3, $4)
-       RETURNING id`,
-      [email, first_name || '', last_name || '', phone || null]
-    )
-
-    res.json({ message: 'User synced successfully', new: true, id: result.rows[0].id })
+    res.json({ message: 'User synced successfully' })
   } catch (error) {
     console.error('Sync user error:', error)
-    res.status(500).json({ error: 'Internal server error: ' + error.message })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -524,12 +543,12 @@ app.delete('/api/cart', authenticateToken, async (req, res) => {
 // Create a reservation
 app.post('/api/reservations', authenticateToken, async (req, res) => {
   try {
-    const {
-      restaurant_id,
+    const { 
+      restaurant_id, 
       table_id,  // Single table_id instead of table_ids array
-      reservation_date,
-      reservation_time,
-      party_size,
+      reservation_date, 
+      reservation_time, 
+      party_size, 
       special_requests,
       customer_name,
       customer_phone,
@@ -541,26 +560,9 @@ app.post('/api/reservations', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
-    // Check if table is already booked for this date and time
-    const existingReservation = await pool.query(
-      `SELECT id FROM reservation
-       WHERE restaurant_id = $1
-       AND table_id = $2
-       AND reservation_date = $3
-       AND reservation_time = $4
-       AND status != 'cancelled'`,
-      [restaurant_id, table_id, reservation_date, reservation_time]
-    )
-
-    if (existingReservation.rows.length > 0) {
-      return res.status(400).json({
-        error: 'This table is already booked for the selected date and time. Please choose a different time or table.'
-      })
-    }
-
     // Create reservation
     const result = await pool.query(
-      `INSERT INTO reservation
+      `INSERT INTO reservation 
         (customer_id, restaurant_id, table_id, reservation_date, reservation_time, party_size, special_requests, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
        RETURNING *`,
@@ -578,37 +580,6 @@ app.post('/api/reservations', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error: ' + error.message })
   }
 })
-
-// Check available tables for a specific date and time
-app.get('/api/reservations/check', authenticateToken, async (req, res) => {
-  try {
-    const { restaurant_id, date, time } = req.query;
-
-    if (!restaurant_id || !date || !time) {
-      return res.status(400).json({ error: 'Missing required parameters' });
-    }
-
-    // Get all reservations for the same restaurant, date, and time that are not cancelled
-    const result = await pool.query(
-      `SELECT table_id FROM reservation
-       WHERE restaurant_id = $1
-       AND reservation_date = $2
-       AND reservation_time = $3
-       AND status != 'cancelled'`,
-      [restaurant_id, date, time]
-    );
-
-    // Return array of booked table IDs
-    const booked_table_ids = result.rows
-      .map(row => row.table_id)
-      .filter(id => id !== null);
-
-    res.json({ booked_table_ids });
-  } catch (error) {
-    console.error('Check reservations error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 // Get customer reservations
 app.get('/api/reservations', authenticateToken, async (req, res) => {
@@ -863,314 +834,722 @@ app.get('/api/payments', authenticateToken, async (req, res) => {
 // Staff login
 app.post('/api/staff/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body
 
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
+      return res.status(400).json({ error: 'Email and password required' })
     }
 
-    // Find staff member by email
+    // Find staff member
     const result = await pool.query(
-      `SELECT s.*, r.name as restaurant_name 
-       FROM staff s 
-       LEFT JOIN restaurant r ON s.restaurant_id = r.id 
-       WHERE s.email = $1`,
+      'SELECT * FROM staff WHERE email = $1',
       [email]
-    );
+    )
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+      return res.status(401).json({ error: 'Invalid credentials' })
     }
 
-    const staff = result.rows[0];
+    const staff = result.rows[0]
 
     // Verify password
-    const validPassword = await bcrypt.compare(password, staff.password);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+    const isValidPassword = await bcrypt.compare(password, staff.password)
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' })
     }
 
     // Generate token
     const token = jwt.sign(
-      { 
-        id: staff.id, 
-        email: staff.email, 
-        role: staff.role, 
-        restaurant_id: staff.restaurant_id,
-        type: 'staff'
-      },
+      { id: staff.id, email: staff.email, type: 'staff', restaurant_id: staff.restaurant_id, role: staff.role },
       JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+      { expiresIn: '7d' }
+    )
 
     res.json({
+      message: 'Login successful',
       token,
       staff: {
         id: staff.id,
         email: staff.email,
+        first_name: staff.first_name,
+        last_name: staff.last_name,
         name: staff.name,
         role: staff.role,
-        restaurant_id: staff.restaurant_id,
-        restaurant_name: staff.restaurant_name
+        restaurant_id: staff.restaurant_id
       }
-    });
+    })
   } catch (error) {
-    console.error('Staff login error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Staff login error:', error)
+    res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
-// Middleware for staff authentication
-const authenticateStaffToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
-    }
-    
-    if (user.type !== 'staff') {
-      return res.status(403).json({ error: 'Staff access required' });
-    }
-    
-    req.user = user;
-    next();
-  });
-};
-
-// Get staff orders (for specific restaurant)
+// Get staff orders
 app.get('/api/staff/orders', authenticateStaffToken, async (req, res) => {
   try {
-    const { restaurant_id, status } = req.query;
-    const staffRestaurantId = req.user.restaurant_id;
-
-    // Staff can only view orders from their restaurant (managers can view all)
-    const targetRestaurantId = (req.user.role === 'manager' && restaurant_id) 
-      ? restaurant_id 
-      : staffRestaurantId;
-
-    if (!targetRestaurantId) {
-      return res.json([]);
-    }
-
-    let query = `
-      SELECT o.*, c.email as customer_email, r.name as restaurant_name
-      FROM orders o
-      LEFT JOIN customer c ON o.customer_id = c.id
-      LEFT JOIN restaurant r ON o.restaurant_id = r.id
-      WHERE o.restaurant_id = $1
-    `;
-    
-    const params = [targetRestaurantId];
-
-    if (status) {
-      query += ` AND o.status = $2`;
-      params.push(status);
-    }
-
-    query += ` ORDER BY o.created_at DESC`;
-
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    const { restaurant_id } = req.staff
+    const result = await pool.query(
+      `SELECT o.*, r.name as restaurant_name, c.first_name || ' ' || c.last_name as customer_name
+       FROM orders o
+       LEFT JOIN restaurant r ON r.id = o.restaurant_id
+       LEFT JOIN customer c ON c.id = o.customer_id
+       WHERE o.restaurant_id = $1
+       ORDER BY o.order_date DESC`,
+      [restaurant_id]
+    )
+    res.json(result.rows)
   } catch (error) {
-    console.error('Get staff orders error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Get staff orders error:', error)
+    res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
-// Get staff reservations (for specific restaurant)
+// Get staff reservations
 app.get('/api/staff/reservations', authenticateStaffToken, async (req, res) => {
   try {
-    const { restaurant_id, status, date } = req.query;
-    const staffRestaurantId = req.user.restaurant_id;
-
-    // Staff can only view reservations from their restaurant (managers can view all)
-    const targetRestaurantId = (req.user.role === 'manager' && restaurant_id) 
-      ? restaurant_id 
-      : staffRestaurantId;
-
-    if (!targetRestaurantId) {
-      return res.json([]);
-    }
-
-    let query = `
-      SELECT r.*, c.email as customer_email, c.phone as customer_phone, 
-             c.first_name || ' ' || c.last_name as customer_name,
-             rest.name as restaurant_name,
-             t.name as table_name
-      FROM reservation r
-      LEFT JOIN customer c ON r.customer_id = c.id
-      LEFT JOIN restaurant rest ON r.restaurant_id = rest.id
-      LEFT JOIN restaurant_table t ON r.table_id = t.id
-      WHERE r.restaurant_id = $1
-    `;
-    
-    const params = [targetRestaurantId];
-
-    if (status) {
-      query += ` AND r.status = $2`;
-      params.push(status);
-    }
-
-    if (date) {
-      query += ` AND r.reservation_date = $2`;
-      params.push(date);
-    }
-
-    query += ` ORDER BY r.reservation_date ASC, r.reservation_time ASC`;
-
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    const { restaurant_id } = req.staff
+    const result = await pool.query(
+      `SELECT r.*, rest.name as restaurant_name, c.first_name || ' ' || c.last_name as customer_name
+       FROM reservation r
+       LEFT JOIN restaurant rest ON rest.id = r.restaurant_id
+       LEFT JOIN customer c ON c.id = r.customer_id
+       WHERE r.restaurant_id = $1
+       ORDER BY r.reservation_date DESC, r.reservation_time DESC`,
+      [restaurant_id]
+    )
+    res.json(result.rows)
   } catch (error) {
-    console.error('Get staff reservations error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Get staff reservations error:', error)
+    res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
-// Update order status (confirm/complete)
-app.put('/api/staff/orders/:orderId/status', authenticateStaffToken, async (req, res) => {
+// Update order status
+app.put('/api/staff/orders/:id/status', authenticateStaffToken, async (req, res) => {
   try {
-    const { orderId } = req.params;
-    const { status } = req.body;
-
-    // Validate status
-    const validStatuses = ['pending', 'confirmed', 'preparing', 'ready', 'completed', 'cancelled'];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-
-    // Check if order exists and belongs to staff's restaurant
-    const orderCheck = await pool.query(
-      `SELECT o.* FROM orders o 
-       WHERE o.id = $1 AND o.restaurant_id = $2`,
-      [orderId, req.user.restaurant_id]
-    );
-
-    if (orderCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
+    const { id } = req.params
+    const { status } = req.body
+    const { restaurant_id } = req.staff
 
     const result = await pool.query(
-      `UPDATE orders SET status = $1, updated_at = NOW() 
+      `UPDATE orders 
+       SET status = $1 
        WHERE id = $2 AND restaurant_id = $3
        RETURNING *`,
-      [status, orderId, req.user.restaurant_id]
-    );
+      [status, id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Order not found' })
+    }
 
     res.json({
-      message: 'Order status updated successfully',
+      message: 'Order status updated',
       order: result.rows[0]
-    });
+    })
   } catch (error) {
-    console.error('Update order status error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Update order status error:', error)
+    res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
-// Update reservation status (confirm/cancel)
-app.put('/api/staff/reservations/:reservationId/status', authenticateStaffToken, async (req, res) => {
+// Update reservation status
+app.put('/api/staff/reservations/:id/status', authenticateStaffToken, async (req, res) => {
   try {
-    const { reservationId } = req.params;
-    const { status } = req.body;
-
-    // Validate status
-    const validStatuses = ['pending', 'confirmed', 'completed', 'cancelled', 'no-show'];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-
-    // Check if reservation exists and belongs to staff's restaurant
-    const resCheck = await pool.query(
-      `SELECT * FROM reservation 
-       WHERE id = $1 AND restaurant_id = $2`,
-      [reservationId, req.user.restaurant_id]
-    );
-
-    if (resCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Reservation not found' });
-    }
+    const { id } = req.params
+    const { status } = req.body
+    const { restaurant_id } = req.staff
 
     const result = await pool.query(
-      `UPDATE reservation SET status = $1, updated_at = NOW() 
+      `UPDATE reservation 
+       SET status = $1 
        WHERE id = $2 AND restaurant_id = $3
        RETURNING *`,
-      [status, reservationId, req.user.restaurant_id]
-    );
+      [status, id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Reservation not found' })
+    }
 
     res.json({
-      message: 'Reservation status updated successfully',
+      message: 'Reservation status updated',
       reservation: result.rows[0]
-    });
+    })
   } catch (error) {
-    console.error('Update reservation status error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Update reservation status error:', error)
+    res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
 
-// Get staff dashboard stats
+// Get staff stats
 app.get('/api/staff/stats', authenticateStaffToken, async (req, res) => {
   try {
-    const restaurantId = req.user.restaurant_id;
+    const { restaurant_id } = req.staff
 
-    if (!restaurantId) {
-      return res.json({
-        todayReservations: 0,
-        pendingOrders: 0,
-        completedOrders: 0,
-        totalRevenue: 0
-      });
-    }
-
-    // Get today's date
-    const today = new Date().toISOString().split('T')[0];
-
-    // Count today's reservations
-    const todayReservations = await pool.query(
-      `SELECT COUNT(*) as count FROM reservation 
-       WHERE restaurant_id = $1 AND reservation_date = $2 AND status != 'cancelled'`,
-      [restaurantId, today]
-    );
-
-    // Count pending orders
-    const pendingOrders = await pool.query(
-      `SELECT COUNT(*) as count FROM orders 
-       WHERE restaurant_id = $1 AND status IN ('pending', 'confirmed', 'preparing')`,
-      [restaurantId]
-    );
-
-    // Count completed orders today
-    const completedOrders = await pool.query(
-      `SELECT COUNT(*) as count FROM orders 
-       WHERE restaurant_id = $1 AND status = 'completed' AND DATE(created_at) = $2`,
-      [restaurantId, today]
-    );
-
-    // Calculate today's revenue
-    const revenue = await pool.query(
-      `SELECT COALESCE(SUM(total_amount), 0) as total FROM orders 
-       WHERE restaurant_id = $1 AND status = 'completed' AND DATE(created_at) = $2`,
-      [restaurantId, today]
-    );
+    const [ordersResult, reservationsResult, revenueResult] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*) as total, 
+                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                COUNT(*) FILTER (WHERE status = 'completed') as completed
+         FROM orders 
+         WHERE restaurant_id = $1`,
+        [restaurant_id]
+      ),
+      pool.query(
+        `SELECT COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                COUNT(*) FILTER (WHERE status = 'confirmed') as confirmed
+         FROM reservation 
+         WHERE restaurant_id = $1`,
+        [restaurant_id]
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(total_amount), 0) as total_revenue
+         FROM orders 
+         WHERE restaurant_id = $1 AND status = 'completed'`,
+        [restaurant_id]
+      )
+    ])
 
     res.json({
-      todayReservations: parseInt(todayReservations.rows[0].count),
-      pendingOrders: parseInt(pendingOrders.rows[0].count),
-      completedOrders: parseInt(completedOrders.rows[0].count),
-      totalRevenue: parseFloat(revenue.rows[0].total)
-    });
+      orders: ordersResult.rows[0],
+      reservations: reservationsResult.rows[0],
+      revenue: revenueResult.rows[0].total_revenue
+    })
   } catch (error) {
-    console.error('Get staff stats error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Get staff stats error:', error)
+    res.status(500).json({ error: 'Internal server error' })
   }
-});
+})
+
+// ============================================
+// ADMIN ROUTES
+// ============================================
+
+// Test route to verify admin routes are loaded
+app.get('/api/admin/test', (req, res) => {
+  res.json({ message: 'Admin routes are working' })
+})
+
+// Admin login
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' })
+    }
+
+    // First check if admin table exists and has the user
+    let adminResult = { rows: [] }
+    let tableExists = false
+    
+    try {
+      // Check if admin table exists
+      const tableCheck = await pool.query(
+        `SELECT EXISTS (
+          SELECT FROM information_schema.tables 
+          WHERE table_schema = 'public' 
+          AND table_name = 'admin'
+        )`
+      )
+      tableExists = tableCheck.rows[0].exists
+      
+      if (tableExists) {
+        adminResult = await pool.query(
+          'SELECT * FROM admin WHERE email = $1',
+          [email]
+        )
+      }
+    } catch (e) {
+      console.log('Admin table check failed, trying staff table:', e.message)
+    }
+
+    // If not found in admin table, check staff table for admin role
+    if (adminResult.rows.length === 0) {
+      adminResult = await pool.query(
+        'SELECT * FROM staff WHERE email = $1 AND role = $2',
+        [email, 'admin']
+      )
+    }
+
+    if (adminResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' })
+    }
+
+    const admin = adminResult.rows[0]
+
+    // Verify password
+    const isValidPassword = await bcrypt.compare(password, admin.password)
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' })
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { id: admin.id, email: admin.email, type: 'admin' },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    )
+
+    res.json({
+      message: 'Login successful',
+      token,
+      admin: {
+        id: admin.id,
+        email: admin.email,
+        first_name: admin.first_name,
+        last_name: admin.last_name,
+        name: admin.name
+      }
+    })
+  } catch (error) {
+    console.error('Admin login error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get admin stats
+app.get('/api/admin/stats', authenticateAdminToken, async (req, res) => {
+  try {
+    const [restaurantsResult, ordersResult, reservationsResult, staffResult, revenueResult] = await Promise.all([
+      pool.query('SELECT COUNT(*) as total FROM restaurant'),
+      pool.query('SELECT COUNT(*) as total FROM orders'),
+      pool.query('SELECT COUNT(*) as total FROM reservation'),
+      pool.query('SELECT COUNT(*) as total FROM staff'),
+      pool.query(`SELECT COALESCE(SUM(total_amount), 0) as total_revenue FROM orders WHERE status = 'completed'`)
+    ])
+
+    res.json({
+      restaurants: parseInt(restaurantsResult.rows[0].total),
+      orders: parseInt(ordersResult.rows[0].total),
+      reservations: parseInt(reservationsResult.rows[0].total),
+      staff: parseInt(staffResult.rows[0].total),
+      revenue: parseFloat(revenueResult.rows[0].total_revenue)
+    })
+  } catch (error) {
+    console.error('Get admin stats error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get all orders (admin)
+app.get('/api/admin/orders', authenticateAdminToken, async (req, res) => {
+  try {
+    const { status } = req.query
+    let query = `
+      SELECT o.*, r.name as restaurant_name, c.first_name || ' ' || c.last_name as customer_name
+      FROM orders o
+      LEFT JOIN restaurant r ON r.id = o.restaurant_id
+      LEFT JOIN customer c ON c.id = o.customer_id
+    `
+    const params = []
+
+    if (status) {
+      query += ' WHERE o.status = $1'
+      params.push(status)
+    }
+
+    query += ' ORDER BY o.order_date DESC'
+
+    const result = await pool.query(query, params)
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get admin orders error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get all reservations (admin)
+app.get('/api/admin/reservations', authenticateAdminToken, async (req, res) => {
+  try {
+    const { status } = req.query
+    let query = `
+      SELECT r.*, rest.name as restaurant_name, c.first_name || ' ' || c.last_name as customer_name
+      FROM reservation r
+      LEFT JOIN restaurant rest ON rest.id = r.restaurant_id
+      LEFT JOIN customer c ON c.id = r.customer_id
+    `
+    const params = []
+
+    if (status) {
+      query += ' WHERE r.status = $1'
+      params.push(status)
+    }
+
+    query += ' ORDER BY r.reservation_date DESC, r.reservation_time DESC'
+
+    const result = await pool.query(query, params)
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get admin reservations error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get all restaurants (admin)
+app.get('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, description, address, email, phone, 
+              opening_time, closing_time, cuisine_type, created_at
+       FROM restaurant 
+       ORDER BY name`
+    )
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get admin restaurants error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Create restaurant (admin)
+app.post('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
+  try {
+    const { name, description, address, email, phone, opening_time, closing_time, cuisine_type } = req.body
+
+    const result = await pool.query(
+      `INSERT INTO restaurant (name, description, address, email, phone, opening_time, closing_time, cuisine_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [name, description, address, email, phone, opening_time, closing_time, cuisine_type]
+    )
+
+    res.status(201).json({
+      message: 'Restaurant created successfully',
+      restaurant: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Create restaurant error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update restaurant (admin)
+app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { name, description, address, email, phone, opening_time, closing_time, cuisine_type } = req.body
+
+    const result = await pool.query(
+      `UPDATE restaurant 
+       SET name = COALESCE($1, name),
+           description = COALESCE($2, description),
+           address = COALESCE($3, address),
+           email = COALESCE($4, email),
+           phone = COALESCE($5, phone),
+           opening_time = COALESCE($6, opening_time),
+           closing_time = COALESCE($7, closing_time),
+           cuisine_type = COALESCE($8, cuisine_type)
+       WHERE id = $9
+       RETURNING *`,
+      [name, description, address, email, phone, opening_time, closing_time, cuisine_type, id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Restaurant not found' })
+    }
+
+    res.json({
+      message: 'Restaurant updated successfully',
+      restaurant: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Update restaurant error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete restaurant (admin)
+app.delete('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const result = await pool.query('DELETE FROM restaurant WHERE id = $1 RETURNING *', [id])
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Restaurant not found' })
+    }
+
+    res.json({ message: 'Restaurant deleted successfully' })
+  } catch (error) {
+    console.error('Delete restaurant error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get all staff (admin)
+app.get('/api/admin/staff', authenticateAdminToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT s.*, r.name as restaurant_name
+       FROM staff s
+       LEFT JOIN restaurant r ON r.id = s.restaurant_id
+       ORDER BY s.email`
+    )
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get admin staff error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Create staff (admin)
+app.post('/api/admin/staff', authenticateAdminToken, async (req, res) => {
+  try {
+    const { email, password, first_name, last_name, role, restaurant_id } = req.body
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' })
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10)
+
+    const result = await pool.query(
+      `INSERT INTO staff (email, password, first_name, last_name, role, restaurant_id, name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, email, first_name, last_name, role, restaurant_id, name`,
+      [email, hashedPassword, first_name, last_name, role || 'staff', restaurant_id, `${first_name} ${last_name}`]
+    )
+
+    res.status(201).json({
+      message: 'Staff created successfully',
+      staff: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Create staff error:', error)
+    if (error.code === '23505') {
+      return res.status(400).json({ error: 'Email already exists' })
+    }
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update staff (admin)
+app.put('/api/admin/staff/:id', authenticateAdminToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { email, password, first_name, last_name, role, restaurant_id } = req.body
+
+    let updateFields = []
+    let params = []
+    let paramIndex = 1
+
+    if (email) {
+      updateFields.push(`email = $${paramIndex++}`)
+      params.push(email)
+    }
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10)
+      updateFields.push(`password = $${paramIndex++}`)
+      params.push(hashedPassword)
+    }
+    if (first_name) {
+      updateFields.push(`first_name = $${paramIndex++}`)
+      params.push(first_name)
+    }
+    if (last_name) {
+      updateFields.push(`last_name = $${paramIndex++}`)
+      params.push(last_name)
+    }
+    if (role) {
+      updateFields.push(`role = $${paramIndex++}`)
+      params.push(role)
+    }
+    if (restaurant_id !== undefined) {
+      updateFields.push(`restaurant_id = $${paramIndex++}`)
+      params.push(restaurant_id)
+    }
+    if (first_name || last_name) {
+      updateFields.push(`name = $${paramIndex++}`)
+      params.push(`${first_name || ''} ${last_name || ''}`.trim())
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' })
+    }
+
+    params.push(id)
+
+    const result = await pool.query(
+      `UPDATE staff 
+       SET ${updateFields.join(', ')}
+       WHERE id = $${paramIndex}
+       RETURNING id, email, first_name, last_name, role, restaurant_id, name`,
+      params
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Staff not found' })
+    }
+
+    res.json({
+      message: 'Staff updated successfully',
+      staff: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Update staff error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete staff (admin)
+app.delete('/api/admin/staff/:id', authenticateAdminToken, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const result = await pool.query('DELETE FROM staff WHERE id = $1 RETURNING *', [id])
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Staff not found' })
+    }
+
+    res.json({ message: 'Staff deleted successfully' })
+  } catch (error) {
+    console.error('Delete staff error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get analytics overview (admin)
+app.get('/api/admin/analytics/overview', authenticateAdminToken, async (req, res) => {
+  try {
+    const { period = 'month' } = req.query
+    let dateFilter = ''
+    
+    if (period === 'week') {
+      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '7 days'"
+    } else if (period === 'month') {
+      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '30 days'"
+    } else if (period === 'year') {
+      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '365 days'"
+    }
+
+    const [revenueResult, ordersResult, avgOrderResult] = await Promise.all([
+      pool.query(`SELECT COALESCE(SUM(total_amount), 0) as revenue FROM orders WHERE status = 'completed' ${dateFilter}`),
+      pool.query(`SELECT COUNT(*) as count FROM orders WHERE 1=1 ${dateFilter}`),
+      pool.query(`SELECT COALESCE(AVG(total_amount), 0) as avg_order FROM orders WHERE status = 'completed' ${dateFilter}`)
+    ])
+
+    res.json({
+      revenue: parseFloat(revenueResult.rows[0].revenue),
+      orders: parseInt(ordersResult.rows[0].count),
+      avgOrderValue: parseFloat(avgOrderResult.rows[0].avg_order)
+    })
+  } catch (error) {
+    console.error('Get analytics overview error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get top restaurants (admin)
+app.get('/api/admin/analytics/top-restaurants', authenticateAdminToken, async (req, res) => {
+  try {
+    const { period = 'month', limit = 10 } = req.query
+    let dateFilter = ''
+    
+    if (period === 'week') {
+      dateFilter = "AND o.order_date >= CURRENT_DATE - INTERVAL '7 days'"
+    } else if (period === 'month') {
+      dateFilter = "AND o.order_date >= CURRENT_DATE - INTERVAL '30 days'"
+    } else if (period === 'year') {
+      dateFilter = "AND o.order_date >= CURRENT_DATE - INTERVAL '365 days'"
+    }
+
+    const result = await pool.query(
+      `SELECT r.id, r.name, COUNT(o.id) as order_count, COALESCE(SUM(o.total_amount), 0) as revenue
+       FROM restaurant r
+       LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status = 'completed' ${dateFilter}
+       GROUP BY r.id, r.name
+       ORDER BY revenue DESC
+       LIMIT $1`,
+      [limit]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get top restaurants error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get peak hours (admin)
+app.get('/api/admin/analytics/peak-hours', authenticateAdminToken, async (req, res) => {
+  try {
+    const { period = 'month' } = req.query
+    let dateFilter = ''
+    
+    if (period === 'week') {
+      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '7 days'"
+    } else if (period === 'month') {
+      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '30 days'"
+    } else if (period === 'year') {
+      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '365 days'"
+    }
+
+    const result = await pool.query(
+      `SELECT EXTRACT(HOUR FROM order_date) as hour, COUNT(*) as order_count
+       FROM orders
+       WHERE 1=1 ${dateFilter}
+       GROUP BY EXTRACT(HOUR FROM order_date)
+       ORDER BY hour`
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get peak hours error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get recent reservations (admin)
+app.get('/api/admin/analytics/recent-reservations', authenticateAdminToken, async (req, res) => {
+  try {
+    const { limit = 20 } = req.query
+
+    const result = await pool.query(
+      `SELECT r.*, rest.name as restaurant_name, c.first_name || ' ' || c.last_name as customer_name
+       FROM reservation r
+       LEFT JOIN restaurant rest ON rest.id = r.restaurant_id
+       LEFT JOIN customer c ON c.id = r.customer_id
+       ORDER BY r.reservation_date DESC, r.reservation_time DESC
+       LIMIT $1`,
+      [limit]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get recent reservations error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get revenue by day (admin)
+app.get('/api/admin/analytics/revenue-by-day', authenticateAdminToken, async (req, res) => {
+  try {
+    const { days = 30 } = req.query
+
+    const result = await pool.query(
+      `SELECT DATE(order_date) as date, COALESCE(SUM(total_amount), 0) as revenue, COUNT(*) as order_count
+       FROM orders
+       WHERE status = 'completed' AND order_date >= CURRENT_DATE - INTERVAL '${days} days'
+       GROUP BY DATE(order_date)
+       ORDER BY date DESC`
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get revenue by day error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
 
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`)
   console.log(`📍 API base URL: http://localhost:${PORT}/api`)
+  console.log(`✅ Admin routes: /api/admin/login, /api/admin/stats, etc.`)
+  console.log(`✅ Staff routes: /api/staff/login, /api/staff/orders, etc.`)
 })
