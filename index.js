@@ -654,6 +654,67 @@ app.put('/api/reservations/:id', authenticateToken, async (req, res) => {
   }
 })
 
+// Request cancellation (customer)
+app.post('/api/reservations/:id/request-cancellation', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { reason } = req.body
+
+    // Truncate reason to 500 characters to match database column
+    const truncatedReason = reason ? reason.slice(0, 500) : null
+
+    // Only allow pending or confirmed reservations to request cancellation
+    const result = await pool.query(
+      `UPDATE reservation 
+       SET status = 'cancellation_requested',
+           cancellation_reason = $1
+       WHERE id = $2 AND customer_id = $3 AND status IN ('pending', 'confirmed')
+       RETURNING *`,
+      [truncatedReason, id, req.user.id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Reservation cannot be cancelled or not found' })
+    }
+
+    res.json({
+      message: 'Cancellation request submitted successfully',
+      reservation: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Request cancellation error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Cancel request (customer - withdraw)
+app.post('/api/reservations/:id/cancel-request', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const result = await pool.query(
+      `UPDATE reservation 
+       SET status = 'pending',
+           cancellation_reason = NULL
+       WHERE id = $1 AND customer_id = $2 AND status = 'cancellation_requested'
+       RETURNING *`,
+      [id, req.user.id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'No cancellation request found' })
+    }
+
+    res.json({
+      message: 'Cancellation request withdrawn',
+      reservation: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Cancel request error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // ============================================
 // ORDER ROUTES
 // ============================================
@@ -1088,6 +1149,64 @@ app.put('/api/staff/reservations/:id/status', authenticateStaffToken, async (req
     })
   } catch (error) {
     console.error('Update reservation status error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Approve cancellation request (staff)
+app.post('/api/staff/reservations/:id/approve-cancellation', authenticateStaffToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `UPDATE reservation 
+       SET status = 'cancelled',
+           cancellation_reason = NULL
+       WHERE id = $1 AND restaurant_id = $2 AND status = 'cancellation_requested'
+       RETURNING *`,
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Cancellation request not found or already processed' })
+    }
+
+    res.json({
+      message: 'Cancellation approved',
+      reservation: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Approve cancellation error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Reject cancellation request (staff)
+app.post('/api/staff/reservations/:id/reject-cancellation', authenticateStaffToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `UPDATE reservation 
+       SET status = 'confirmed',
+           cancellation_reason = NULL
+       WHERE id = $1 AND restaurant_id = $2 AND status = 'cancellation_requested'
+       RETURNING *`,
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Cancellation request not found or already processed' })
+    }
+
+    res.json({
+      message: 'Cancellation rejected, reservation confirmed',
+      reservation: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Reject cancellation error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
