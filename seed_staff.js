@@ -42,10 +42,9 @@ async function seedStaff() {
 
     // Staff members to create
     const staffMembers = [
-      { email: 'manager@sushi.com', password: 'manager123', name: 'Manager Kim', role: 'manager', restaurant_id: 1 },
       { email: 'staff@sushi.com', password: 'staff123', name: 'Staff Lee', role: 'staff', restaurant_id: 1 },
-      { email: 'manager@pasta.com', password: 'manager123', name: 'Manager Wang', role: 'manager', restaurant_id: 2 },
       { email: 'staff@pasta.com', password: 'staff123', name: 'Staff Zhang', role: 'staff', restaurant_id: 2 },
+      { email: 'staff@curry.com', password: 'staff123', name: 'Staff Kumar', role: 'staff', restaurant_id: 3 },
       { email: 'admin@restaurant.com', password: 'admin123', name: 'Admin User', role: 'admin', restaurant_id: null },
     ];
 
@@ -66,7 +65,7 @@ async function seedStaff() {
           SET password = $1, name = $2, role = $3, restaurant_id = $4
           WHERE email = $5
         `, [hashedPassword, staff.name, staff.role, staff.restaurant_id, staff.email]);
-        console.log(`✅ Updated: ${staff.email} (${staff.role})`);
+        console.log('Updated: ' + staff.email + ' (' + staff.role + ')');
       } else {
         // Insert new staff
         const nameParts = staff.name.split(' ');
@@ -74,24 +73,23 @@ async function seedStaff() {
           INSERT INTO staff (email, password, name, role, restaurant_id, first_name, last_name)
           VALUES ($1, $2, $3, $4, $5, $6, $7)
         `, [staff.email, hashedPassword, staff.name, staff.role, staff.restaurant_id, nameParts[0] || '', nameParts.slice(1).join(' ') || '']);
-        console.log(`✅ Created: ${staff.email} (${staff.role})`);
+        console.log('Created: ' + staff.email + ' (' + staff.role + ')');
       }
     }
 
-    console.log('\n🎉 Staff accounts ready!\n');
+    console.log('\nStaff accounts ready!\n');
     console.log('Available accounts:');
-    console.log('┌─────────────────────┬────────────┬────────────┐');
-    console.log('│ Email               │ Password   │ Role       │');
-    console.log('├─────────────────────┼────────────┼────────────┤');
-    console.log('│ manager@sushi.com   │ manager123 │ Manager    │');
-    console.log('│ staff@sushi.com     │ staff123   │ Staff      │');
-    console.log('│ manager@pasta.com   │ manager123 │ Manager    │');
-    console.log('│ staff@pasta.com     │ staff123   │ Staff      │');
-    console.log('│ admin@restaurant.com│ admin123   │ Admin      │');
-    console.log('└─────────────────────┴────────────┴────────────┘');
+    console.log('+-------------------+----------+------+');
+    console.log('| Email             | Password | Role |');
+    console.log('+-------------------+----------+------+');
+    console.log('| staff@sushi.com   | staff123 | Staff |');
+    console.log('| staff@pasta.com   | staff123 | Staff |');
+    console.log('| staff@curry.com   | staff123 | Staff |');
+    console.log('| admin@restaurant.com| admin123 | Admin |');
+    console.log('+-------------------+----------+------+');
 
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('Error:', error.message);
   } finally {
     await pool.end();
   }

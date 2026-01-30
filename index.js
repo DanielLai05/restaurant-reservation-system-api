@@ -230,7 +230,14 @@ app.get('/api/auth/profile', authenticateToken, async (req, res) => {
     )
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Customer not found' })
+      // Auto-create customer if not exists
+      const newCustomer = await pool.query(
+        `INSERT INTO customer (id, first_name, last_name, email, phone)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, first_name, last_name, email, phone, created_at`,
+        [req.user.id, 'User', '', req.user.email || '', null]
+      )
+      return res.json(newCustomer.rows[0])
     }
 
     res.json(result.rows[0])
@@ -251,6 +258,7 @@ app.get('/api/restaurants', async (req, res) => {
       `SELECT id, name, description, address, email, phone, 
               opening_time, closing_time, cuisine_type, created_at
        FROM restaurant 
+       WHERE is_active = true
        ORDER BY name`
     )
     res.json(result.rows)
@@ -265,7 +273,7 @@ app.get('/api/restaurants/:id', async (req, res) => {
   try {
     const { id } = req.params
     const result = await pool.query(
-      `SELECT * FROM restaurant WHERE id = $1`,
+      `SELECT * FROM restaurant WHERE id = $1 AND is_active = true`,
       [id]
     )
 
@@ -276,6 +284,24 @@ app.get('/api/restaurants/:id', async (req, res) => {
     res.json(result.rows[0])
   } catch (error) {
     console.error('Get restaurant error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get restaurant floor plan (all tables)
+app.get('/api/restaurants/:id/floor-plan', async (req, res) => {
+  try {
+    const { id } = req.params
+    const result = await pool.query(
+      `SELECT id, table_number, capacity, is_available, location, created_at
+       FROM restaurant_table
+       WHERE restaurant_id = $1
+       ORDER BY table_number`,
+      [id]
+    )
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get floor plan error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -666,9 +692,25 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
     } 
     // Case 2: Get items directly from request body (local cart)
     else if (items && items.length > 0) {
+      // If item_id is not provided, look it up by name
+      const itemsNeedingLookup = items.filter(item => !item.item_id && !item.id);
+      const nameToIdMap = {};
+      
+      if (itemsNeedingLookup.length > 0) {
+        const itemNames = itemsNeedingLookup.map(item => item.item_name || item.name);
+        const itemLookupResult = await pool.query(
+          `SELECT id, item_name FROM menu_item WHERE item_name = ANY($1)`,
+          [itemNames]
+        );
+        
+        itemLookupResult.rows.forEach(row => {
+          nameToIdMap[row.item_name] = row.id;
+        });
+      }
+      
       cartItems = items.map(item => ({
         ...item,
-        item_id: item.item_id || item.id,
+        item_id: item.item_id || item.id || nameToIdMap[item.item_name || item.name] || null,
         item_name: item.item_name || item.name,
         special_instruction: item.special_instructions || item.special_instruction
       }));
@@ -695,6 +737,10 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 
     // Create order items
     for (const item of cartItems) {
+      if (!item.item_id) {
+        console.warn('Missing item_id for item:', item);
+        continue; // Skip items without valid item_id
+      }
       const itemTotal = (item.price || 0) * (item.quantity || 0)
       await pool.query(
         `INSERT INTO order_item (order_id, item_id, quantity, unit_price, subtotal, special_instructions)
@@ -722,7 +768,7 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 // Get customer orders
 app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
+    const ordersResult = await pool.query(
       `SELECT o.*, r.name as restaurant_name
        FROM orders o
        LEFT JOIN restaurant r ON r.id = o.restaurant_id
@@ -730,7 +776,23 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
        ORDER BY o.order_date DESC`,
       [req.user.id]
     )
-    res.json(result.rows)
+
+    // Fetch order items for each order
+    const orders = await Promise.all(ordersResult.rows.map(async (order) => {
+      const itemsResult = await pool.query(
+        `SELECT oi.*, mi.item_name
+         FROM order_item oi
+         LEFT JOIN menu_item mi ON mi.id = oi.item_id
+         WHERE oi.order_id = $1`,
+        [order.id]
+      )
+      return {
+        ...order,
+        items: itemsResult.rows
+      }
+    }))
+
+    res.json(orders)
   } catch (error) {
     console.error('Get orders error:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -908,8 +970,13 @@ app.get('/api/staff/orders', authenticateStaffToken, async (req, res) => {
 app.get('/api/staff/reservations', authenticateStaffToken, async (req, res) => {
   try {
     const { restaurant_id } = req.staff
+
+    // Get reservations
     const result = await pool.query(
-      `SELECT r.*, rest.name as restaurant_name, c.first_name || ' ' || c.last_name as customer_name
+      `SELECT r.*, rest.name as restaurant_name,
+              c.first_name || ' ' || c.last_name as customer_name,
+              c.email as customer_email,
+              c.phone as customer_phone
        FROM reservation r
        LEFT JOIN restaurant rest ON rest.id = r.restaurant_id
        LEFT JOIN customer c ON c.id = r.customer_id
@@ -917,7 +984,50 @@ app.get('/api/staff/reservations', authenticateStaffToken, async (req, res) => {
        ORDER BY r.reservation_date DESC, r.reservation_time DESC`,
       [restaurant_id]
     )
-    res.json(result.rows)
+
+    const reservations = result.rows
+
+    // Get all orders for these reservations
+    const reservationIds = reservations.map(r => r.id)
+    let ordersWithItems = {}
+
+    if (reservationIds.length > 0) {
+      const ordersResult = await pool.query(
+        `SELECT o.*,
+                json_agg(
+                  json_build_object(
+                    'item_name', mi.item_name,
+                    'quantity', oi.quantity,
+                    'unit_price', oi.unit_price,
+                    'subtotal', oi.subtotal,
+                    'special_instructions', oi.special_instructions
+                  )
+                ) FILTER (WHERE oi.id IS NOT NULL) as items
+         FROM orders o
+         LEFT JOIN order_item oi ON oi.order_id = o.id
+         LEFT JOIN menu_item mi ON mi.id = oi.item_id
+         WHERE o.reservation_id = ANY($1)
+         GROUP BY o.id`,
+        [reservationIds]
+      )
+
+      // Group orders by reservation_id
+      ordersResult.rows.forEach(order => {
+        const resId = order.reservation_id
+        if (!ordersWithItems[resId]) {
+          ordersWithItems[resId] = []
+        }
+        ordersWithItems[resId].push(order)
+      })
+    }
+
+    // Attach orders to each reservation
+    const reservationsWithOrders = reservations.map(res => ({
+      ...res,
+      orders: ordersWithItems[res.id] || []
+    }))
+
+    res.json(reservationsWithOrders)
   } catch (error) {
     console.error('Get staff reservations error:', error)
     res.status(500).json({ error: 'Internal server error' })
@@ -1191,12 +1301,34 @@ app.get('/api/admin/reservations', authenticateAdminToken, async (req, res) => {
 // Get all restaurants (admin)
 app.get('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT id, name, description, address, email, phone, 
-              opening_time, closing_time, cuisine_type, created_at
-       FROM restaurant 
-       ORDER BY name`
-    )
+    const result = await pool.query(`
+      SELECT 
+        r.id, r.name, r.description, r.address, r.email, r.phone, 
+        r.opening_time, r.closing_time, r.cuisine_type, r.created_at,
+        r.is_active,
+        COALESCE(reservation_count.reservation_count, 0) as total_reservations,
+        COALESCE(order_count.order_count, 0) as total_orders,
+        COALESCE(staff_count.staff_count, 0) as total_staff
+      FROM restaurant r
+      LEFT JOIN (
+        SELECT restaurant_id, COUNT(*) as reservation_count 
+        FROM reservation 
+        GROUP BY restaurant_id
+      ) reservation_count ON r.id = reservation_count.restaurant_id
+      LEFT JOIN (
+        SELECT restaurant_id, COUNT(*) as order_count 
+        FROM orders
+        WHERE restaurant_id IS NOT NULL
+        GROUP BY restaurant_id
+      ) order_count ON r.id = order_count.restaurant_id
+      LEFT JOIN (
+        SELECT restaurant_id, COUNT(*) as staff_count 
+        FROM staff 
+        WHERE restaurant_id IS NOT NULL
+        GROUP BY restaurant_id
+      ) staff_count ON r.id = staff_count.restaurant_id
+      ORDER BY r.name
+    `)
     res.json(result.rows)
   } catch (error) {
     console.error('Get admin restaurants error:', error)
@@ -1230,7 +1362,7 @@ app.post('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
 app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) => {
   try {
     const { id } = req.params
-    const { name, description, address, email, phone, opening_time, closing_time, cuisine_type } = req.body
+    const { name, description, address, email, phone, opening_time, closing_time, cuisine_type, is_active } = req.body
 
     const result = await pool.query(
       `UPDATE restaurant 
@@ -1241,10 +1373,11 @@ app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) =
            phone = COALESCE($5, phone),
            opening_time = COALESCE($6, opening_time),
            closing_time = COALESCE($7, closing_time),
-           cuisine_type = COALESCE($8, cuisine_type)
-       WHERE id = $9
+           cuisine_type = COALESCE($8, cuisine_type),
+           is_active = COALESCE($9, is_active)
+       WHERE id = $10
        RETURNING *`,
-      [name, description, address, email, phone, opening_time, closing_time, cuisine_type, id]
+      [name, description, address, email, phone, opening_time, closing_time, cuisine_type, is_active, id]
     )
 
     if (result.rows.length === 0) {
@@ -1427,16 +1560,18 @@ app.get('/api/admin/analytics/overview', authenticateAdminToken, async (req, res
       dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '365 days'"
     }
 
-    const [revenueResult, ordersResult, avgOrderResult] = await Promise.all([
-      pool.query(`SELECT COALESCE(SUM(total_amount), 0) as revenue FROM orders WHERE status = 'completed' ${dateFilter}`),
+    const [revenueResult, ordersResult, avgOrderResult, reservationsResult] = await Promise.all([
+      pool.query(`SELECT COALESCE(SUM(total_amount), 0) as revenue FROM orders`),
       pool.query(`SELECT COUNT(*) as count FROM orders WHERE 1=1 ${dateFilter}`),
-      pool.query(`SELECT COALESCE(AVG(total_amount), 0) as avg_order FROM orders WHERE status = 'completed' ${dateFilter}`)
+      pool.query(`SELECT COALESCE(AVG(total_amount), 0) as avg_order FROM orders WHERE 1=1 ${dateFilter}`),
+      pool.query(`SELECT COUNT(*) as count FROM reservation`)
     ])
 
     res.json({
-      revenue: parseFloat(revenueResult.rows[0].revenue),
-      orders: parseInt(ordersResult.rows[0].count),
-      avgOrderValue: parseFloat(avgOrderResult.rows[0].avg_order)
+      totalReservations: parseInt(reservationsResult.rows[0].count),
+      totalOrders: parseInt(ordersResult.rows[0].count),
+      totalRevenue: parseFloat(revenueResult.rows[0].revenue),
+      averageOrderValue: parseFloat(avgOrderResult.rows[0].avg_order)
     })
   } catch (error) {
     console.error('Get analytics overview error:', error)
@@ -1449,21 +1584,25 @@ app.get('/api/admin/analytics/top-restaurants', authenticateAdminToken, async (r
   try {
     const { period = 'month', limit = 10 } = req.query
     let dateFilter = ''
-    
+
     if (period === 'week') {
-      dateFilter = "AND o.order_date >= CURRENT_DATE - INTERVAL '7 days'"
+      dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '7 days'"
     } else if (period === 'month') {
-      dateFilter = "AND o.order_date >= CURRENT_DATE - INTERVAL '30 days'"
+      dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '30 days'"
     } else if (period === 'year') {
-      dateFilter = "AND o.order_date >= CURRENT_DATE - INTERVAL '365 days'"
+      dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '365 days'"
     }
 
     const result = await pool.query(
-      `SELECT r.id, r.name, COUNT(o.id) as order_count, COALESCE(SUM(o.total_amount), 0) as revenue
+      `SELECT r.id, r.name, 
+              COUNT(DISTINCT o.id) as order_count,
+              COALESCE(SUM(o.total_amount), 0) as revenue,
+              COUNT(DISTINCT res.id) as reservation_count
        FROM restaurant r
-       LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status = 'completed' ${dateFilter}
+       LEFT JOIN orders o ON o.restaurant_id = r.id  -- Removed: AND o.status = 'completed'
+       LEFT JOIN reservation res ON res.restaurant_id = r.id ${dateFilter}
        GROUP BY r.id, r.name
-       ORDER BY revenue DESC
+       ORDER BY order_count DESC, revenue DESC
        LIMIT $1`,
       [limit]
     )
@@ -1480,21 +1619,21 @@ app.get('/api/admin/analytics/peak-hours', authenticateAdminToken, async (req, r
   try {
     const { period = 'month' } = req.query
     let dateFilter = ''
-    
+
     if (period === 'week') {
-      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '7 days'"
+      dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '7 days'"
     } else if (period === 'month') {
-      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '30 days'"
+      dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '30 days'"
     } else if (period === 'year') {
-      dateFilter = "AND order_date >= CURRENT_DATE - INTERVAL '365 days'"
+      dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '365 days'"
     }
 
     const result = await pool.query(
-      `SELECT EXTRACT(HOUR FROM order_date) as hour, COUNT(*) as order_count
-       FROM orders
+      `SELECT EXTRACT(HOUR FROM reservation_time) as hour, COUNT(*) as reservation_count
+       FROM reservation
        WHERE 1=1 ${dateFilter}
-       GROUP BY EXTRACT(HOUR FROM order_date)
-       ORDER BY hour`
+       GROUP BY EXTRACT(HOUR FROM reservation_time)
+       ORDER BY reservation_count DESC`
     )
 
     res.json(result.rows)
