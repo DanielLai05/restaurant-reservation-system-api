@@ -255,9 +255,10 @@ app.get('/api/auth/profile', authenticateToken, async (req, res) => {
 app.get('/api/restaurants', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, description, address, email, phone, 
-              opening_time, closing_time, cuisine_type, created_at
-       FROM restaurant 
+      `SELECT id, name, description, address, email, phone,
+              opening_time, closing_time, cuisine_type, created_at,
+              image_url, max_capacity
+       FROM restaurant
        WHERE is_active = true
        ORDER BY name`
     )
@@ -1726,10 +1727,15 @@ app.get('/api/admin/reservations', authenticateAdminToken, async (req, res) => {
 app.get('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT 
-        r.id, r.name, r.description, r.address, r.email, r.phone, 
-        r.opening_time, r.closing_time, r.cuisine_type, r.created_at,
-        r.is_active,
+      SELECT
+        r.id, r.name, r.description,
+        r.address as location,
+        r.email, r.phone,
+        r.opening_time, r.closing_time,
+        r.cuisine_type as cuisine,
+        r.created_at,
+        r.image_url,
+        r.max_capacity as capacity,
         COALESCE(reservation_count.reservation_count, 0) as total_reservations,
         COALESCE(order_count.order_count, 0) as total_orders,
         COALESCE(staff_count.staff_count, 0) as total_staff
@@ -1763,13 +1769,24 @@ app.get('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
 // Create restaurant (admin)
 app.post('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
   try {
-    const { name, description, address, email, phone, opening_time, closing_time, cuisine_type } = req.body
+    const {
+      name,
+      description,
+      location,        // frontend: location -> database: address
+      cuisine,         // frontend: cuisine -> database: cuisine_type
+      opening_time,    // frontend: opening_time -> database: opening_time (TIME format)
+      closing_time,    // frontend: closing_time -> database: closing_time (TIME format)
+      capacity,        // frontend: capacity -> database: max_capacity
+      image_url,
+      email,
+      phone
+    } = req.body
 
     const result = await pool.query(
-      `INSERT INTO restaurant (name, description, address, email, phone, opening_time, closing_time, cuisine_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO restaurant (name, description, address, cuisine_type, email, phone, opening_time, closing_time, max_capacity, image_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [name, description, address, email, phone, opening_time, closing_time, cuisine_type]
+      [name, description, location, cuisine, email, phone, opening_time, closing_time, capacity, image_url]
     )
 
     res.status(201).json({
@@ -1786,22 +1803,36 @@ app.post('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
 app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) => {
   try {
     const { id } = req.params
-    const { name, description, address, email, phone, opening_time, closing_time, cuisine_type, is_active } = req.body
+
+    // Map frontend field names to database field names
+    const {
+      name,
+      description,
+      location,        // frontend: location -> database: address
+      cuisine,         // frontend: cuisine -> database: cuisine_type
+      opening_time,    // frontend: opening_time -> database: opening_time (TIME format)
+      closing_time,    // frontend: closing_time -> database: closing_time (TIME format)
+      capacity,        // frontend: capacity -> database: max_capacity
+      image_url,
+      email,
+      phone
+    } = req.body
 
     const result = await pool.query(
-      `UPDATE restaurant 
+      `UPDATE restaurant
        SET name = COALESCE($1, name),
            description = COALESCE($2, description),
            address = COALESCE($3, address),
-           email = COALESCE($4, email),
-           phone = COALESCE($5, phone),
-           opening_time = COALESCE($6, opening_time),
-           closing_time = COALESCE($7, closing_time),
-           cuisine_type = COALESCE($8, cuisine_type),
-           is_active = COALESCE($9, is_active)
-       WHERE id = $10
+           cuisine_type = COALESCE($4, cuisine_type),
+           email = COALESCE($5, email),
+           phone = COALESCE($6, phone),
+           opening_time = COALESCE($7, opening_time),
+           closing_time = COALESCE($8, closing_time),
+           max_capacity = COALESCE($9, max_capacity),
+           image_url = COALESCE($10, image_url)
+       WHERE id = $11
        RETURNING *`,
-      [name, description, address, email, phone, opening_time, closing_time, cuisine_type, is_active, id]
+      [name, description, location, cuisine, email, phone, opening_time, closing_time, capacity, image_url, id]
     )
 
     if (result.rows.length === 0) {
