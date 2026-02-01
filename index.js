@@ -1186,16 +1186,52 @@ app.put('/api/staff/reservations/:id/status', authenticateStaffToken, async (req
     const { status } = req.body
     const { restaurant_id } = req.staff
 
+    console.log(`📋 Staff updating reservation ${id} to status: ${status}`);
+
+    // Get reservation details first
+    const reservationResult = await pool.query(
+      'SELECT r.*, rest.name as restaurant_name FROM reservation r LEFT JOIN restaurant rest ON r.restaurant_id = rest.id WHERE r.id = $1 AND r.restaurant_id = $2',
+      [id, restaurant_id]
+    )
+
+    if (reservationResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Reservation not found' })
+    }
+
+    const reservation = reservationResult.rows[0]
+    console.log(`📋 Reservation data:`, reservation);
+
+    if (!reservation.customer_id) {
+      console.error('❌ ERROR: Reservation has no customer_id!');
+    }
+
     const result = await pool.query(
-      `UPDATE reservation 
-       SET status = $1 
+      `UPDATE reservation
+       SET status = $1
        WHERE id = $2 AND restaurant_id = $3
        RETURNING *`,
       [status, id, restaurant_id]
     )
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Reservation not found' })
+    // Send notification to customer when reservation is confirmed
+    if (status === 'confirmed' && reservation.customer_id) {
+      try {
+        const notifResult = await pool.query(
+          `INSERT INTO notification (restaurant_id, customer_id, type, title, message, reservation_id, is_read)
+           VALUES (NULL, $1, $2, $3, $4, $5, FALSE)
+           RETURNING *`,
+          [
+            reservation.customer_id,
+            'reservation_confirmed',
+            'Reservation Confirmed',
+            `Your reservation at ${reservation.restaurant_name || 'the restaurant'} on ${reservation.reservation_date} at ${reservation.reservation_time} has been confirmed!`,
+            id
+          ]
+        );
+        console.log(`✅ Notification created: ID ${notifResult.rows[0].id}`);
+      } catch (notifError) {
+        console.error(`❌ Failed to create notification:`, notifError.message);
+      }
     }
 
     res.json({
@@ -1406,6 +1442,108 @@ app.delete('/api/staff/notifications/:id', authenticateStaffToken, async (req, r
     const result = await pool.query(
       'DELETE FROM notification WHERE id = $1 AND restaurant_id = $2 RETURNING *',
       [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found' })
+    }
+
+    res.json({ message: 'Notification deleted' })
+  } catch (error) {
+    console.error('Delete notification error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ============================================
+// CUSTOMER NOTIFICATION ROUTES
+// ============================================
+
+// Get customer notifications
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const customer_id = req.user.id
+
+    const result = await pool.query(
+      `SELECT * FROM notification
+       WHERE customer_id = $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [customer_id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get notifications error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get customer notification count (unread)
+app.get('/api/notifications/count', authenticateToken, async (req, res) => {
+  try {
+    const customer_id = req.user.id
+
+    const result = await pool.query(
+      'SELECT COUNT(*) as count FROM notification WHERE customer_id = $1 AND is_read = false',
+      [customer_id]
+    )
+
+    res.json({ count: parseInt(result.rows[0].count) })
+  } catch (error) {
+    console.error('Get notification count error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Mark notification as read
+app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const customer_id = req.user.id
+
+    const result = await pool.query(
+      'UPDATE notification SET is_read = true WHERE id = $1 AND customer_id = $2 RETURNING *',
+      [id, customer_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found' })
+    }
+
+    res.json(result.rows[0])
+  } catch (error) {
+    console.error('Mark notification read error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Mark all notifications as read
+app.put('/api/notifications/read-all', authenticateToken, async (req, res) => {
+  try {
+    const customer_id = req.user.id
+
+    await pool.query(
+      'UPDATE notification SET is_read = true WHERE customer_id = $1',
+      [customer_id]
+    )
+
+    res.json({ message: 'All notifications marked as read' })
+  } catch (error) {
+    console.error('Mark all notifications read error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete notification
+app.delete('/api/notifications/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const customer_id = req.user.id
+
+    const result = await pool.query(
+      'DELETE FROM notification WHERE id = $1 AND customer_id = $2 RETURNING *',
+      [id, customer_id]
     )
 
     if (result.rows.length === 0) {
