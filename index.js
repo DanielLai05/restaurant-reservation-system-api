@@ -563,18 +563,39 @@ app.delete('/api/cart', authenticateToken, async (req, res) => {
 })
 
 // ============================================
+// NOTIFICATION HELPER FUNCTIONS
+// ============================================
+
+// Create a notification for staff
+async function createNotification(pool, { restaurant_id, type, title, message, reservation_id = null }) {
+  try {
+    const result = await pool.query(
+      `INSERT INTO notification (restaurant_id, type, title, message, reservation_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [restaurant_id, type, title, message, reservation_id]
+    );
+    console.log(`📢 Notification created: ${type} - ${title}`);
+    return result.rows[0];
+  } catch (error) {
+    console.error('Error creating notification:', error);
+    return null;
+  }
+}
+
+// ============================================
 // RESERVATION ROUTES
 // ============================================
 
 // Create a reservation
 app.post('/api/reservations', authenticateToken, async (req, res) => {
   try {
-    const { 
-      restaurant_id, 
+    const {
+      restaurant_id,
       table_id,  // Single table_id instead of table_ids array
-      reservation_date, 
-      reservation_time, 
-      party_size, 
+      reservation_date,
+      reservation_time,
+      party_size,
       special_requests,
       customer_name,
       customer_phone,
@@ -586,9 +607,17 @@ app.post('/api/reservations', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
+    // Get customer info for notification
+    const customerResult = await pool.query(
+      'SELECT first_name, last_name, email FROM customer WHERE id = $1',
+      [customer_id]
+    )
+    const customer = customerResult.rows[0] || { first_name: 'Guest', last_name: '', email: customer_email }
+    const customerName = customer_name || `${customer.first_name} ${customer.last_name}`.trim() || 'Guest'
+
     // Create reservation
     const result = await pool.query(
-      `INSERT INTO reservation 
+      `INSERT INTO reservation
         (customer_id, restaurant_id, table_id, reservation_date, reservation_time, party_size, special_requests, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
        RETURNING *`,
@@ -596,6 +625,15 @@ app.post('/api/reservations', authenticateToken, async (req, res) => {
     )
 
     const reservation = result.rows[0]
+
+    // Create notification for staff
+    await createNotification(pool, {
+      restaurant_id,
+      type: 'reservation_new',
+      title: 'New Reservation',
+      message: `${customerName} made a reservation for ${party_size} guest(s) on ${reservation_date} at ${reservation_time}`,
+      reservation_id: reservation.id
+    })
 
     res.status(201).json({
       message: 'Reservation created successfully',
@@ -663,6 +701,13 @@ app.post('/api/reservations/:id/request-cancellation', authenticateToken, async 
     // Truncate reason to 500 characters to match database column
     const truncatedReason = reason ? reason.slice(0, 500) : null
 
+    // Get reservation details for notification
+    const reservationResult = await pool.query(
+      'SELECT r.*, c.first_name, c.last_name FROM reservation r LEFT JOIN customer c ON c.id = r.customer_id WHERE r.id = $1',
+      [id]
+    )
+    const reservation = reservationResult.rows[0]
+
     // Only allow pending or confirmed reservations to request cancellation
     const result = await pool.query(
       `UPDATE reservation 
@@ -676,6 +721,16 @@ app.post('/api/reservations/:id/request-cancellation', authenticateToken, async 
     if (result.rows.length === 0) {
       return res.status(400).json({ error: 'Reservation cannot be cancelled or not found' })
     }
+
+    // Create notification for staff
+    const customerName = reservation ? `${reservation.first_name} ${reservation.last_name}`.trim() : 'A customer'
+    await createNotification(pool, {
+      restaurant_id: reservation.restaurant_id,
+      type: 'cancellation_request',
+      title: 'Cancellation Request',
+      message: `${customerName} requested to cancel their reservation on ${reservation.reservation_date} at ${reservation.reservation_time}. Reason: ${truncatedReason || 'No reason provided'}`,
+      reservation_id: id
+    })
 
     res.json({
       message: 'Cancellation request submitted successfully',
@@ -1248,6 +1303,118 @@ app.get('/api/staff/stats', authenticateStaffToken, async (req, res) => {
     })
   } catch (error) {
     console.error('Get staff stats error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ============================================
+// NOTIFICATION ROUTES (Staff)
+// ============================================
+
+// Get notifications for staff
+app.get('/api/staff/notifications', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { unread_only } = req.query
+
+    let query = `
+      SELECT n.*, r.reservation_date, r.reservation_time, r.party_size,
+             c.first_name || ' ' || c.last_name as customer_name
+      FROM notification n
+      LEFT JOIN reservation r ON r.id = n.reservation_id
+      LEFT JOIN customer c ON c.id = r.customer_id
+      WHERE n.restaurant_id = $1
+    `
+    const params = [restaurant_id]
+
+    if (unread_only === 'true') {
+      query += ' AND n.is_read = false'
+    }
+
+    query += ' ORDER BY n.created_at DESC LIMIT 50'
+
+    const result = await pool.query(query, params)
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get notifications error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get unread notification count
+app.get('/api/staff/notifications/count', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      'SELECT COUNT(*) as count FROM notification WHERE restaurant_id = $1 AND is_read = false',
+      [restaurant_id]
+    )
+
+    res.json({ count: parseInt(result.rows[0].count) })
+  } catch (error) {
+    console.error('Get notification count error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Mark notification as read
+app.put('/api/staff/notifications/:id/read', authenticateStaffToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `UPDATE notification SET is_read = true WHERE id = $1 AND restaurant_id = $2 RETURNING *`,
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found' })
+    }
+
+    res.json({ message: 'Notification marked as read', notification: result.rows[0] })
+  } catch (error) {
+    console.error('Mark notification read error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Mark all notifications as read
+app.put('/api/staff/notifications/read-all', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+
+    await pool.query(
+      'UPDATE notification SET is_read = true WHERE restaurant_id = $1',
+      [restaurant_id]
+    )
+
+    res.json({ message: 'All notifications marked as read' })
+  } catch (error) {
+    console.error('Mark all notifications read error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete a notification
+app.delete('/api/staff/notifications/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      'DELETE FROM notification WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found' })
+    }
+
+    res.json({ message: 'Notification deleted' })
+  } catch (error) {
+    console.error('Delete notification error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

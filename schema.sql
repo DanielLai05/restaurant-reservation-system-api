@@ -162,6 +162,21 @@ CREATE TABLE admin (
 );
 
 -- ============================================
+-- TABLE: notification
+-- Staff notifications for reservation events
+-- ============================================
+CREATE TABLE notification (
+    id SERIAL PRIMARY KEY,
+    restaurant_id INTEGER REFERENCES restaurant(id) ON DELETE CASCADE,
+    type VARCHAR(50) NOT NULL CHECK (type IN ('reservation_new', 'reservation_cancelled', 'cancellation_request', 'order_new', 'reservation_confirmed')),
+    title VARCHAR(200) NOT NULL,
+    message TEXT NOT NULL,
+    reservation_id INTEGER REFERENCES reservation(id) ON DELETE CASCADE,
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================
 -- TABLE: cancellation_request
 -- Tracks reservation cancellation requests
 -- ============================================
