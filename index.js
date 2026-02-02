@@ -1,6 +1,5 @@
 import express from 'express'
 import cors from 'cors'
-import path from 'path'
 import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
 import { Pool } from 'pg'
@@ -9,13 +8,14 @@ import jwt from 'jsonwebtoken'
 
 const app = express()
 const PORT = process.env.PORT || 3000
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production'
+const JWT_SECRET = process.env.JWT_SECRET
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+// Note: __dirname is not available in ES modules
+// If you need path operations, use fileURLToPath(import.meta.url) workaround
 
 app.use(express.json())
 app.use(cors())
+// Note: cors() middleware automatically handles OPTIONS preflight requests
 dotenv.config()
 
 const pool = new Pool({
@@ -990,8 +990,192 @@ app.get('/api/orders/:id', authenticateToken, async (req, res) => {
 // ============================================
 // HOME
 // ============================================
+// Root route - API documentation
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'))
+  const htmlDoc = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TempahNow API Documentation</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f8f9fa;
+      color: #333;
+      line-height: 1.6;
+      padding: 40px 20px;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    header {
+      text-align: center;
+      margin-bottom: 50px;
+    }
+    h1 {
+      font-size: 2.5rem;
+      color: #2c3e50;
+      margin-bottom: 10px;
+    }
+    .subtitle { color: #6c757d; font-size: 1.1rem; }
+    .version {
+      display: inline-block;
+      background: #3498db;
+      color: white;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      margin-top: 15px;
+    }
+    .section {
+      background: white;
+      border-radius: 12px;
+      padding: 25px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .section h2 {
+      font-size: 1.3rem;
+      color: #2c3e50;
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #f1f3f4;
+    }
+    .endpoint {
+      display: block;
+      padding: 12px 15px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      text-decoration: none;
+      color: #333;
+      transition: all 0.2s ease;
+    }
+    .endpoint:hover {
+      background: #e9ecef;
+      transform: translateX(5px);
+    }
+    .method {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-right: 10px;
+    }
+    .method.GET { background: #d4edda; color: #155724; }
+    .method.POST { background: #cce5ff; color: #004085; }
+    .method.PUT { background: #fff3cd; color: #856404; }
+    .method.DELETE { background: #f8d7da; color: #721c24; }
+    .path { font-family: 'Monaco', 'Consolas', monospace; color: #495057; }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      background: #e9ecef;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      color: #6c757d;
+      margin-right: 8px;
+    }
+    footer {
+      text-align: center;
+      margin-top: 40px;
+      color: #6c757d;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🍽️ TempahNow API</h1>
+      <p class="subtitle">Restaurant Reservation System API Documentation</p>
+      <span class="version">v1.0.0</span>
+    </header>
+
+    <div class="section">
+      <h2>🔐 Authentication</h2>
+      <a href="#auth" class="endpoint"><span class="method POST">POST</span><span class="path">/api/auth/register</span></a>
+      <a href="#auth" class="endpoint"><span class="method POST">POST</span><span class="path">/api/auth/login</span></a>
+      <a href="#auth" class="endpoint"><span class="method POST">POST</span><span class="path">/api/auth/sync-user</span></a>
+    </div>
+
+    <div class="section">
+      <h2>🏪 Restaurants</h2>
+      <a href="#restaurants" class="endpoint"><span class="method GET">GET</span><span class="path">/api/restaurants</span></a>
+      <a href="#restaurants" class="endpoint"><span class="method GET">GET</span><span class="path">/api/restaurants/:id</span></a>
+      <a href="#restaurants" class="endpoint"><span class="method GET">GET</span><span class="path">/api/restaurants/:id/menu</span></a>
+      <a href="#restaurants" class="endpoint"><span class="method GET">GET</span><span class="path">/api/restaurants/:id/tables</span></a>
+    </div>
+
+    <div class="section">
+      <h2>📅 Reservations</h2>
+      <a href="#reservations" class="endpoint"><span class="method GET">GET</span><span class="path">/api/reservations</span></a>
+      <a href="#reservations" class="endpoint"><span class="method POST">POST</span><span class="path">/api/reservations</span></a>
+      <a href="#reservations" class="endpoint"><span class="method GET">GET</span><span class="path">/api/reservations/:id</span></a>
+      <a href="#reservations" class="endpoint"><span class="method PUT">PUT</span><span class="path">/api/reservations/:id</span></a>
+      <a href="#reservations" class="endpoint"><span class="method DELETE">DELETE</span><span class="path">/api/reservations/:id</span></a>
+    </div>
+
+    <div class="section">
+      <h2>📋 Menu</h2>
+      <a href="#menu" class="endpoint"><span class="method GET">GET</span><span class="path">/api/menu/categories/:restaurantId</span></a>
+      <a href="#menu" class="endpoint"><span class="method GET">GET</span><span class="path">/api/menu/items/:restaurantId</span></a>
+    </div>
+
+    <div class="section">
+      <h2>🛒 Orders</h2>
+      <a href="#orders" class="endpoint"><span class="method GET">GET</span><span class="path">/api/orders/:reservationId</span></a>
+      <a href="#orders" class="endpoint"><span class="method POST">POST</span><span class="path">/api/orders</span></a>
+      <a href="#orders" class="endpoint"><span class="method PUT">PUT</span><span class="path">/api/orders/:id</span></a>
+    </div>
+
+    <div class="section">
+      <h2>🪑 Tables</h2>
+      <a href="#tables" class="endpoint"><span class="method GET">GET</span><span class="path">/api/tables/availability</span></a>
+    </div>
+
+    <div class="section">
+      <h2>🔔 Notifications</h2>
+      <a href="#notifications" class="endpoint"><span class="method GET">GET</span><span class="path">/api/notifications</span></a>
+    </div>
+
+    <div class="section">
+      <h2>👨‍💼 Admin</h2>
+      <a href="#admin" class="endpoint"><span class="method POST">POST</span><span class="path">/api/admin/login</span></a>
+      <a href="#admin" class="endpoint"><span class="method GET">GET</span><span class="path">/api/admin/stats</span></a>
+      <a href="#admin" class="endpoint"><span class="method GET">GET</span><span class="path">/api/admin/restaurants</span></a>
+      <a href="#admin" class="endpoint"><span class="method POST">POST</span><span class="path">/api/admin/restaurants</span></a>
+      <a href="#admin" class="endpoint"><span class="method GET">GET</span><span class="path">/api/admin/reservations</span></a>
+      <a href="#admin" class="endpoint"><span class="method GET">GET</span><span class="path">/api/admin/orders</span></a>
+      <a href="#admin" class="endpoint"><span class="method GET">GET</span><span class="path">/api/admin/staff</span></a>
+      <a href="#admin" class="endpoint"><span class="method POST">POST</span><span class="path">/api/admin/staff</span></a>
+    </div>
+
+    <div class="section">
+      <h2>👨‍🍳 Staff</h2>
+      <a href="#staff" class="endpoint"><span class="method POST">POST</span><span class="path">/api/staff/login</span></a>
+      <a href="#staff" class="endpoint"><span class="method GET">GET</span><span class="path">/api/staff/dashboard</span></a>
+      <a href="#staff" class="endpoint"><span class="method GET">GET</span><span class="path">/api/staff/reservations</span></a>
+      <a href="#staff" class="endpoint"><span class="method PUT">PUT</span><span class="path">/api/staff/reservations/:id</span></a>
+      <a href="#staff" class="endpoint"><span class="method GET">GET</span><span class="path">/api/staff/orders</span></a>
+      <a href="#staff" class="endpoint"><span class="method PUT">PUT</span><span class="path">/api/staff/orders/:id</span></a>
+      <a href="#staff" class="endpoint"><span class="method GET">GET</span><span class="path">/api/staff/tables</span></a>
+      <a href="#staff" class="endpoint"><span class="method POST">POST</span><span class="path">/api/staff/tables</span></a>
+      <a href="#staff" class="endpoint"><span class="method GET">GET</span><span class="path">/api/staff/menu/categories</span></a>
+      <a href="#staff" class="endpoint"><span class="method POST">POST</span><span class="path">/api/staff/menu/categories</span></a>
+      <a href="#staff" class="endpoint"><span class="method POST">POST</span><span class="path">/api/staff/menu/items</span></a>
+    </div>
+    <footer>
+      <p>TempahNow Restaurant Reservation System API v1.0.0</p>
+      <p>Built with Express.js & PostgreSQL</p>
+    </footer>
+  </div>
+</body>
+</html>
+`
+  res.type('html').send(htmlDoc)
 })
 
 // ============================================
@@ -2767,10 +2951,17 @@ app.delete('/api/staff/menu/categories/:id', authenticateStaffToken, async (req,
   }
 })
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`)
-  console.log(`📍 API base URL: http://localhost:${PORT}/api`)
-  console.log(`✅ Admin routes: /api/admin/login, /api/admin/stats, etc.`)
-  console.log(`✅ Staff routes: /api/staff/login, /api/staff/orders, etc.`)
-})
+// Start server (for local development only)
+// In Vercel, this file is exported as a handlers
+// Only start server if running locally (not in Vercel)
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`)
+    console.log(`📍 API base URL: http://localhost:${PORT}/api`)
+    console.log(`✅ Admin routes: /api/admin/login, /api/admin/stats, etc.`)
+    console.log(`✅ Staff routes: /api/staff/login, /api/staff/orders, etc.`)
+  })
+}
+
+// Export for Vercel
+export default app
