@@ -289,17 +289,40 @@ app.get('/api/restaurants/:id', async (req, res) => {
   }
 })
 
-// Get restaurant floor plan (all tables)
+// Get restaurant floor plan (all tables or available for a time slot)
 app.get('/api/restaurants/:id/floor-plan', async (req, res) => {
   try {
     const { id } = req.params
-    const result = await pool.query(
-      `SELECT id, table_number, capacity, is_available, location, created_at
-       FROM "table"
-       WHERE restaurant_id = $1
-       ORDER BY table_number`,
-      [id]
-    )
+    const { date, time } = req.query
+
+    let query = `
+      SELECT id, table_number, capacity, is_available, location, created_at
+      FROM "table"
+      WHERE restaurant_id = $1 AND is_available = true
+    `
+    const params = [id]
+
+    // If date and time provided, filter out booked tables
+    if (date && time) {
+      query += `
+        AND id NOT IN (
+          SELECT table_id FROM reservation 
+          WHERE restaurant_id = $1 
+            AND reservation_date = $2
+            AND status NOT IN ('cancelled', 'no-show')
+            AND (
+              (reservation_time >= $3 AND reservation_time < $3::time + interval '2 hours')
+              OR
+              (reservation_time < $3 AND reservation_time + interval '2 hours' > $3)
+            )
+        )
+      `
+      params.push(date, time)
+    }
+
+    query += ' ORDER BY table_number'
+
+    const result = await pool.query(query, params)
     res.json(result.rows)
   } catch (error) {
     console.error('Get floor plan error:', error)
@@ -623,6 +646,28 @@ app.post('/api/reservations', authenticateToken, async (req, res) => {
 
     if (!restaurant_id || !reservation_date || !reservation_time || !party_size) {
       return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    // Check if table is available for the requested time slot (2 hours)
+    if (table_id) {
+      const checkAvailability = await pool.query(
+        `SELECT id FROM reservation 
+         WHERE restaurant_id = $1 
+           AND table_id = $2 
+           AND reservation_date = $3 
+           AND status NOT IN ('cancelled', 'no-show')
+           AND (
+             -- Check if requested time overlaps with existing reservation (2-hour slots)
+             (reservation_time >= $4 AND reservation_time < $4::time + interval '2 hours')
+             OR
+             (reservation_time < $4 AND reservation_time + interval '2 hours' > $4)
+           )`,
+        [restaurant_id, table_id, reservation_date, reservation_time]
+      )
+
+      if (checkAvailability.rows.length > 0) {
+        return res.status(400).json({ error: 'This table is not available for the selected time slot. Please choose a different time or table.' })
+      }
     }
 
     // Get customer info for notification
