@@ -255,10 +255,10 @@ app.get('/api/auth/profile', authenticateToken, async (req, res) => {
 app.get('/api/restaurants', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, description, address, email, phone,
+      `SELECT id, name, description, address, email, phone, 
               opening_time, closing_time, cuisine_type, created_at,
               image_url, max_capacity
-       FROM restaurant
+       FROM restaurant 
        WHERE is_active = true
        ORDER BY name`
     )
@@ -584,6 +584,23 @@ async function createNotification(pool, { restaurant_id, type, title, message, r
   }
 }
 
+// Create a notification for customer
+async function createCustomerNotification(pool, { customer_id, type, title, message, reservation_id = null }) {
+  try {
+    const result = await pool.query(
+      `INSERT INTO notification (customer_id, type, title, message, reservation_id, is_read)
+       VALUES ($1, $2, $3, $4, $5, FALSE)
+       RETURNING *`,
+      [customer_id, type, title, message, reservation_id]
+    );
+    console.log(`📢 Customer notification created: ${type} - ${title}`);
+    return result.rows[0];
+  } catch (error) {
+    console.error('Error creating customer notification:', error);
+    return null;
+  }
+}
+
 // ============================================
 // RESERVATION ROUTES
 // ============================================
@@ -591,12 +608,12 @@ async function createNotification(pool, { restaurant_id, type, title, message, r
 // Create a reservation
 app.post('/api/reservations', authenticateToken, async (req, res) => {
   try {
-    const {
-      restaurant_id,
+    const { 
+      restaurant_id, 
       table_id,  // Single table_id instead of table_ids array
-      reservation_date,
-      reservation_time,
-      party_size,
+      reservation_date, 
+      reservation_time, 
+      party_size, 
       special_requests,
       customer_name,
       customer_phone,
@@ -618,7 +635,7 @@ app.post('/api/reservations', authenticateToken, async (req, res) => {
 
     // Create reservation
     const result = await pool.query(
-      `INSERT INTO reservation
+      `INSERT INTO reservation 
         (customer_id, restaurant_id, table_id, reservation_date, reservation_time, party_size, special_requests, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
        RETURNING *`,
@@ -739,34 +756,6 @@ app.post('/api/reservations/:id/request-cancellation', authenticateToken, async 
     })
   } catch (error) {
     console.error('Request cancellation error:', error)
-    res.status(500).json({ error: 'Internal server error' })
-  }
-})
-
-// Cancel request (customer - withdraw)
-app.post('/api/reservations/:id/cancel-request', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params
-
-    const result = await pool.query(
-      `UPDATE reservation 
-       SET status = 'pending',
-           cancellation_reason = NULL
-       WHERE id = $1 AND customer_id = $2 AND status = 'cancellation_requested'
-       RETURNING *`,
-      [id, req.user.id]
-    )
-
-    if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'No cancellation request found' })
-    }
-
-    res.json({
-      message: 'Cancellation request withdrawn',
-      reservation: result.rows[0]
-    })
-  } catch (error) {
-    console.error('Cancel request error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1207,8 +1196,8 @@ app.put('/api/staff/reservations/:id/status', authenticateStaffToken, async (req
     }
 
     const result = await pool.query(
-      `UPDATE reservation
-       SET status = $1
+      `UPDATE reservation 
+       SET status = $1 
        WHERE id = $2 AND restaurant_id = $3
        RETURNING *`,
       [status, id, restaurant_id]
@@ -1251,6 +1240,22 @@ app.post('/api/staff/reservations/:id/approve-cancellation', authenticateStaffTo
     const { id } = req.params
     const { restaurant_id } = req.staff
 
+    // Get reservation details first for notification
+    const reservationResult = await pool.query(
+      `SELECT r.*, rest.name as restaurant_name, c.email as customer_email
+       FROM reservation r
+       LEFT JOIN restaurant rest ON r.restaurant_id = rest.id
+       LEFT JOIN customer c ON c.id = r.customer_id
+       WHERE r.id = $1 AND r.restaurant_id = $2`,
+      [id, restaurant_id]
+    )
+
+    if (reservationResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Reservation not found' })
+    }
+
+    const reservation = reservationResult.rows[0]
+
     const result = await pool.query(
       `UPDATE reservation 
        SET status = 'cancelled',
@@ -1262,6 +1267,17 @@ app.post('/api/staff/reservations/:id/approve-cancellation', authenticateStaffTo
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Cancellation request not found or already processed' })
+    }
+
+    // Send notification to customer about approved cancellation
+    if (reservation.customer_id) {
+      await createCustomerNotification(pool, {
+        customer_id: reservation.customer_id,
+        type: 'cancellation_approved',
+        title: 'Cancellation Approved',
+        message: `Your reservation at ${reservation.restaurant_name || 'the restaurant'} on ${reservation.reservation_date} at ${reservation.reservation_time} has been cancelled as requested.`,
+        reservation_id: id
+      })
     }
 
     res.json({
@@ -1280,6 +1296,22 @@ app.post('/api/staff/reservations/:id/reject-cancellation', authenticateStaffTok
     const { id } = req.params
     const { restaurant_id } = req.staff
 
+    // Get reservation details first for notification
+    const reservationResult = await pool.query(
+      `SELECT r.*, rest.name as restaurant_name, c.email as customer_email
+       FROM reservation r
+       LEFT JOIN restaurant rest ON r.restaurant_id = rest.id
+       LEFT JOIN customer c ON c.id = r.customer_id
+       WHERE r.id = $1 AND r.restaurant_id = $2`,
+      [id, restaurant_id]
+    )
+
+    if (reservationResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Reservation not found' })
+    }
+
+    const reservation = reservationResult.rows[0]
+
     const result = await pool.query(
       `UPDATE reservation 
        SET status = 'confirmed',
@@ -1291,6 +1323,17 @@ app.post('/api/staff/reservations/:id/reject-cancellation', authenticateStaffTok
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Cancellation request not found or already processed' })
+    }
+
+    // Send notification to customer about rejected cancellation
+    if (reservation.customer_id) {
+      await createCustomerNotification(pool, {
+        customer_id: reservation.customer_id,
+        type: 'cancellation_rejected',
+        title: 'Cancellation Request Rejected',
+        message: `Your cancellation request for your reservation at ${reservation.restaurant_name || 'the restaurant'} on ${reservation.reservation_date} at ${reservation.reservation_time} has been rejected. Your reservation remains confirmed.`,
+        reservation_id: id
+      })
     }
 
     res.json({
@@ -1819,7 +1862,7 @@ app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) =
     } = req.body
 
     const result = await pool.query(
-      `UPDATE restaurant
+      `UPDATE restaurant 
        SET name = COALESCE($1, name),
            description = COALESCE($2, description),
            address = COALESCE($3, address),
@@ -2039,7 +2082,7 @@ app.get('/api/admin/analytics/top-restaurants', authenticateAdminToken, async (r
   try {
     const { period = 'month', limit = 10 } = req.query
     let dateFilter = ''
-
+    
     if (period === 'week') {
       dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '7 days'"
     } else if (period === 'month') {
@@ -2074,7 +2117,7 @@ app.get('/api/admin/analytics/peak-hours', authenticateAdminToken, async (req, r
   try {
     const { period = 'month' } = req.query
     let dateFilter = ''
-
+    
     if (period === 'week') {
       dateFilter = "AND reservation_date >= CURRENT_DATE - INTERVAL '7 days'"
     } else if (period === 'month') {

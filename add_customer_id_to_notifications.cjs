@@ -1,6 +1,6 @@
 /**
- * Migration: Add notifications table
- * Run this to create the notifications table in the database
+ * Migration: Add customer_id column to notifications table
+ * Run this to update the existing notifications table to support customer notifications
  */
 
 const { Pool } = require('pg');
@@ -16,25 +16,30 @@ const pool = new Pool({
 async function migrate() {
   const client = await pool.connect();
   try {
-    console.log('🔄 Running migration: Add notifications table...');
+    console.log('🔄 Running migration: Add customer_id to notifications table...');
 
-    // Create notification table
+    // Add customer_id column
     await client.query(`
-      CREATE TABLE IF NOT EXISTS notification (
-        id SERIAL PRIMARY KEY,
-        restaurant_id INTEGER REFERENCES restaurant(id) ON DELETE CASCADE,
-        customer_id VARCHAR(50) REFERENCES customer(id) ON DELETE CASCADE,
-        type VARCHAR(50) NOT NULL CHECK (type IN ('reservation_new', 'reservation_cancelled', 'cancellation_request', 'cancellation_approved', 'cancellation_rejected', 'order_new', 'reservation_confirmed')),
-        title VARCHAR(200) NOT NULL,
-        message TEXT NOT NULL,
-        reservation_id INTEGER REFERENCES reservation(id) ON DELETE CASCADE,
-        is_read BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
+      ALTER TABLE notification
+      ADD COLUMN IF NOT EXISTS customer_id VARCHAR(50) REFERENCES customer(id) ON DELETE CASCADE
     `);
 
-    console.log('✅ Notification table created successfully!');
-    console.log('📋 Notification types supported:');
+    console.log('✅ customer_id column added successfully!');
+
+    // Add new notification types
+    await client.query(`
+      ALTER TABLE notification
+      DROP CONSTRAINT IF EXISTS notification_type_check
+    `);
+
+    await client.query(`
+      ALTER TABLE notification
+      ADD CONSTRAINT notification_type_check
+      CHECK (type IN ('reservation_new', 'reservation_cancelled', 'cancellation_request', 'cancellation_approved', 'cancellation_rejected', 'order_new', 'reservation_confirmed'))
+    `);
+
+    console.log('✅ Notification types updated successfully!');
+    console.log('📋 New notification types supported:');
     console.log('   - reservation_new: New reservation made');
     console.log('   - reservation_cancelled: Reservation cancelled');
     console.log('   - cancellation_request: Customer requested cancellation');

@@ -163,12 +163,13 @@ CREATE TABLE admin (
 
 -- ============================================
 -- TABLE: notification
--- Staff notifications for reservation events
+-- Customer and staff notifications for reservation events
 -- ============================================
 CREATE TABLE notification (
     id SERIAL PRIMARY KEY,
     restaurant_id INTEGER REFERENCES restaurant(id) ON DELETE CASCADE,
-    type VARCHAR(50) NOT NULL CHECK (type IN ('reservation_new', 'reservation_cancelled', 'cancellation_request', 'order_new', 'reservation_confirmed')),
+    customer_id VARCHAR(50) REFERENCES customer(id) ON DELETE CASCADE,
+    type VARCHAR(50) NOT NULL CHECK (type IN ('reservation_new', 'reservation_cancelled', 'cancellation_request', 'cancellation_approved', 'cancellation_rejected', 'order_new', 'reservation_confirmed')),
     title VARCHAR(200) NOT NULL,
     message TEXT NOT NULL,
     reservation_id INTEGER REFERENCES reservation(id) ON DELETE CASCADE,
