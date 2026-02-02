@@ -1500,6 +1500,200 @@ app.delete('/api/staff/notifications/:id', authenticateStaffToken, async (req, r
 })
 
 // ============================================
+// STAFF MENU MANAGEMENT ROUTES
+// ============================================
+
+// Add menu category
+app.post('/api/staff/menu/categories', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { name, description, display_order } = req.body
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Category name is required' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO menu_category (restaurant_id, category_name, description, display_order)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [restaurant_id, name.trim(), description || null, display_order || 0]
+    )
+
+    res.status(201).json({
+      message: 'Menu category created successfully',
+      category: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Add menu category error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get menu categories for staff's restaurant
+app.get('/api/staff/menu/categories', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `SELECT mc.*, COUNT(mi.id) as item_count
+       FROM menu_category mc
+       LEFT JOIN menu_item mi ON mi.category_id = mc.id
+       WHERE mc.restaurant_id = $1
+       GROUP BY mc.id
+       ORDER BY mc.display_order, mc.category_name`,
+      [restaurant_id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get menu categories error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Add menu item
+app.post('/api/staff/menu/items', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { category_id, name, description, price, image_url, is_available, preparation_time } = req.body
+
+    if (!category_id) {
+      return res.status(400).json({ error: 'Please select a category' })
+    }
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Item name is required' })
+    }
+
+    if (price === undefined || price === null || price < 0) {
+      return res.status(400).json({ error: 'Valid price is required' })
+    }
+
+    // Verify category belongs to this restaurant
+    const categoryCheck = await pool.query(
+      'SELECT id FROM menu_category WHERE id = $1 AND restaurant_id = $2',
+      [category_id, restaurant_id]
+    )
+
+    if (categoryCheck.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid category' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO menu_item (category_id, item_name, description, price, image_url, is_available)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [
+        category_id,
+        name.trim(),
+        description || null,
+        price,
+        image_url || null,
+        is_available !== false
+      ]
+    )
+
+    res.status(201).json({
+      message: 'Menu item created successfully',
+      item: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Add menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get menu items for staff's restaurant
+app.get('/api/staff/menu/items', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `SELECT mi.*, mc.category_name as category_name
+       FROM menu_item mi
+       LEFT JOIN menu_category mc ON mc.id = mi.category_id
+       WHERE mc.restaurant_id = $1
+       ORDER BY mc.category_name, mi.item_name`,
+      [restaurant_id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get menu items error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update menu item
+app.put('/api/staff/menu/items/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+    const { category_id, name, description, price, image_url, is_available, preparation_time } = req.body
+
+    // Verify menu item belongs to this restaurant
+    const itemCheck = await pool.query(
+      `SELECT id FROM menu_item 
+       WHERE id = $1 AND category_id IN (SELECT id FROM menu_category WHERE restaurant_id = $2)`,
+      [id, restaurant_id]
+    )
+
+    if (itemCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Menu item not found' })
+    }
+
+    const result = await pool.query(
+      `UPDATE menu_item
+       SET category_id = COALESCE($1, category_id),
+           item_name = COALESCE($2, item_name),
+           description = COALESCE($3, description),
+           price = COALESCE($4, price),
+           image_url = COALESCE($5, image_url),
+           is_available = COALESCE($6, is_available),
+           preparation_time = COALESCE($7, preparation_time),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $8 AND category_id IN (SELECT id FROM menu_category WHERE restaurant_id = $9)
+       RETURNING *`,
+      [category_id, name, description, price, image_url, is_available, preparation_time, id, restaurant_id]
+    )
+
+    res.json({
+      message: 'Menu item updated successfully',
+      item: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Update menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete menu item
+app.delete('/api/staff/menu/items/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+
+    // Delete menu item through category to verify restaurant ownership
+    const result = await pool.query(
+      `DELETE FROM menu_item 
+       WHERE id = $1 AND category_id IN (SELECT id FROM menu_category WHERE restaurant_id = $2)
+       RETURNING *`,
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Menu item not found' })
+    }
+
+    res.json({ message: 'Menu item deleted successfully' })
+  } catch (error) {
+    console.error('Delete menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ============================================
 // CUSTOMER NOTIFICATION ROUTES
 // ============================================
 
@@ -2179,6 +2373,212 @@ app.get('/api/admin/analytics/revenue-by-day', authenticateAdminToken, async (re
     res.json(result.rows)
   } catch (error) {
     console.error('Get revenue by day error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ============================================
+// STAFF MENU MANAGEMENT ROUTES
+// ============================================
+
+// Get menu categories for staff's restaurant
+app.get('/api/staff/menu/categories', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `SELECT mc.*, COUNT(mi.id) as item_count
+       FROM menu_category mc
+       LEFT JOIN menu_item mi ON mi.category_id = mc.id
+       WHERE mc.restaurant_id = $1
+       GROUP BY mc.id
+       ORDER BY mc.display_order, mc.id`,
+      [restaurant_id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get menu categories error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Get menu items for staff's restaurant
+app.get('/api/staff/menu/items', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { category_id } = req.query
+
+    let query = `
+      SELECT mi.*, mc.category_name as category_name
+      FROM menu_item mi
+      LEFT JOIN menu_category mc ON mc.id = mi.category_id
+      WHERE mc.restaurant_id = $1
+    `
+    const params = [restaurant_id]
+
+    if (category_id) {
+      query += ' AND mi.category_id = $2'
+      params.push(category_id)
+    }
+
+    query += ' ORDER BY mi.category_id, mi.item_name'
+
+    const result = await pool.query(query, params)
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get menu items error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Create menu category
+app.post('/api/staff/menu/categories', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { name, description, display_order } = req.body
+
+    if (!name) {
+      return res.status(400).json({ error: 'Category name is required' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO menu_category (restaurant_id, name, description, display_order)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [restaurant_id, name, description || null, display_order || 0]
+    )
+
+    res.status(201).json(result.rows[0])
+  } catch (error) {
+    console.error('Create menu category error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Create menu item
+app.post('/api/staff/menu/items', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { category_id, name, description, price, image_url, is_available, preparation_time } = req.body
+
+    if (!category_id) {
+      return res.status(400).json({ error: 'Category is required' })
+    }
+    if (!name) {
+      return res.status(400).json({ error: 'Item name is required' })
+    }
+    if (price === undefined || price === null) {
+      return res.status(400).json({ error: 'Price is required' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO menu_item (category_id, item_name, description, price, image_url, is_available)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [
+        category_id,
+        name,
+        description || null,
+        price,
+        image_url || null,
+        is_available !== false
+      ]
+    )
+
+    res.status(201).json(result.rows[0])
+  } catch (error) {
+    console.error('Create menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update menu item
+app.put('/api/staff/menu/items/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+    const { category_id, name, description, price, image_url, is_available, preparation_time } = req.body
+
+    const result = await pool.query(
+      `UPDATE menu_item
+       SET category_id = COALESCE($1, category_id),
+           item_name = COALESCE($2, item_name),
+           description = COALESCE($3, description),
+           price = COALESCE($4, price),
+           image_url = COALESCE($5, image_url),
+           is_available = COALESCE($6, is_available),
+           preparation_time = COALESCE($7, preparation_time),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $8 AND restaurant_id = $9
+       RETURNING *`,
+      [category_id, name, description, price, image_url, is_available, preparation_time, id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Menu item not found' })
+    }
+
+    res.json(result.rows[0])
+  } catch (error) {
+    console.error('Update menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete menu item
+app.delete('/api/staff/menu/items/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+
+    // Delete menu item through category to verify restaurant ownership
+    const result = await pool.query(
+      `DELETE FROM menu_item 
+       WHERE id = $1 AND category_id IN (SELECT id FROM menu_category WHERE restaurant_id = $2)
+       RETURNING *`,
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Menu item not found' })
+    }
+
+    res.json({ message: 'Menu item deleted successfully' })
+  } catch (error) {
+    console.error('Delete menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete menu category
+app.delete('/api/staff/menu/categories/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+
+    // Check if category has items
+    const itemsCheck = await pool.query(
+      'SELECT COUNT(*) as count FROM menu_item WHERE category_id = $1',
+      [id]
+    )
+
+    if (parseInt(itemsCheck.rows[0].count) > 0) {
+      return res.status(400).json({ error: 'Cannot delete category with existing items. Please delete items first.' })
+    }
+
+    const result = await pool.query(
+      'DELETE FROM menu_category WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Category not found' })
+    }
+
+    res.json({ message: 'Category deleted successfully' })
+  } catch (error) {
+    console.error('Delete menu category error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
