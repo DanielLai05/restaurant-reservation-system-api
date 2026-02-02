@@ -295,7 +295,7 @@ app.get('/api/restaurants/:id/floor-plan', async (req, res) => {
     const { id } = req.params
     const result = await pool.query(
       `SELECT id, table_number, capacity, is_available, location, created_at
-       FROM restaurant_table
+       FROM "table"
        WHERE restaurant_id = $1
        ORDER BY table_number`,
       [id]
@@ -1689,6 +1689,145 @@ app.delete('/api/staff/menu/items/:id', authenticateStaffToken, async (req, res)
     res.json({ message: 'Menu item deleted successfully' })
   } catch (error) {
     console.error('Delete menu item error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ============================================
+// STAFF TABLE MANAGEMENT ROUTES
+// ============================================
+
+// Get all tables for staff's restaurant
+app.get('/api/staff/tables', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+
+    const result = await pool.query(
+      `SELECT * FROM "table" 
+       WHERE restaurant_id = $1 
+       ORDER BY table_number`,
+      [restaurant_id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get tables error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Add a new table
+app.post('/api/staff/tables', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { table_number, capacity, location } = req.body
+
+    if (!table_number || !table_number.trim()) {
+      return res.status(400).json({ error: 'Table number is required' })
+    }
+
+    if (!capacity || capacity < 1 || capacity > 8) {
+      return res.status(400).json({ error: 'Capacity must be between 1 and 8' })
+    }
+
+    // Check if table number already exists for this restaurant
+    const existingTable = await pool.query(
+      'SELECT id FROM "table" WHERE restaurant_id = $1 AND table_number = $2',
+      [restaurant_id, table_number.trim()]
+    )
+
+    if (existingTable.rows.length > 0) {
+      return res.status(400).json({ error: 'Table number already exists' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO "table" (restaurant_id, table_number, capacity, location, is_available)
+       VALUES ($1, $2, $3, $4, true)
+       RETURNING *`,
+      [restaurant_id, table_number.trim(), capacity, location || null]
+    )
+
+    res.status(201).json({
+      message: 'Table added successfully',
+      table: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Add table error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update a table
+app.put('/api/staff/tables/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+    const { table_number, capacity, location, is_available } = req.body
+
+    if (!table_number || !table_number.trim()) {
+      return res.status(400).json({ error: 'Table number is required' })
+    }
+
+    if (!capacity || capacity < 1 || capacity > 8) {
+      return res.status(400).json({ error: 'Capacity must be between 1 and 8' })
+    }
+
+    // Check if table exists and belongs to this restaurant
+    const tableCheck = await pool.query(
+      'SELECT id FROM "table" WHERE id = $1 AND restaurant_id = $2',
+      [id, restaurant_id]
+    )
+
+    if (tableCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Table not found' })
+    }
+
+    // Check if table number already exists for another table
+    const existingTable = await pool.query(
+      'SELECT id FROM "table" WHERE restaurant_id = $1 AND table_number = $2 AND id != $3',
+      [restaurant_id, table_number.trim(), id]
+    )
+
+    if (existingTable.rows.length > 0) {
+      return res.status(400).json({ error: 'Table number already exists' })
+    }
+
+    const result = await pool.query(
+      `UPDATE "table"
+       SET table_number = $1, capacity = $2, location = $3, is_available = $4
+       WHERE id = $5 AND restaurant_id = $6
+       RETURNING *`,
+      [table_number.trim(), capacity, location, is_available !== false, id, restaurant_id]
+    )
+
+    res.json({
+      message: 'Table updated successfully',
+      table: result.rows[0]
+    })
+  } catch (error) {
+    console.error('Update table error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Delete a table
+app.delete('/api/staff/tables/:id', authenticateStaffToken, async (req, res) => {
+  try {
+    const { restaurant_id } = req.staff
+    const { id } = req.params
+
+    const result = await pool.query(
+      'DELETE FROM "table" WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [id, restaurant_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Table not found' })
+    }
+
+    res.json({ message: 'Table deleted successfully' })
+  } catch (error) {
+    console.error('Delete table error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
