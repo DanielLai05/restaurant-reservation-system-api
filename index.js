@@ -6,6 +6,7 @@ import { Pool } from 'pg'
 import bcrypt from 'bcrypt'
 import jwt from 'jsonwebtoken'
 
+dotenv.config()
 const app = express()
 const PORT = process.env.PORT || 3000
 const JWT_SECRET = process.env.JWT_SECRET
@@ -16,7 +17,7 @@ const JWT_SECRET = process.env.JWT_SECRET
 app.use(express.json())
 app.use(cors())
 // Note: cors() middleware automatically handles OPTIONS preflight requests
-dotenv.config()
+
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
