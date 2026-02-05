@@ -3046,9 +3046,16 @@ app.post('/api/payments/hitpay/callback', async (req, res) => {
     // Log raw body to debug
     console.log('HitPay callback RAW BODY:', JSON.stringify(req.body))
 
-    const { payment_id, status, transaction_id } = req.body
+    // HitPay sends different webhook formats:
+    // 1. Payment request webhook: has "id" field
+    // 2. Payment webhook: has "payment_request_id" field
+    const body = req.body
+    const payment_id = body.id || body.payment_request_id
+    const status = body.status
+    const transaction_id = body.payments?.[0]?.id || body.id
 
     console.log('HitPay callback received:', { payment_id, status, transaction_id })
+    console.log('Webhook type:', body.id ? 'payment_request' : 'payment')
 
     if (!payment_id) {
       return res.status(400).json({ error: 'Missing payment_id' })
@@ -3058,6 +3065,7 @@ app.post('/api/payments/hitpay/callback', async (req, res) => {
     const statusMap = {
       'completed': 'completed',
       'success': 'completed',
+      'succeeded': 'completed',
       'pending': 'pending',
       'failed': 'failed',
       'expired': 'expired',
