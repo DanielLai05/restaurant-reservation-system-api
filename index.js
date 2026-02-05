@@ -3009,6 +3009,9 @@ app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
 
     const responseData = await response.json()
 
+    console.log('HitPay API response:', responseData)
+    console.log('Response status:', response.status)
+
     if (!response.ok) {
       console.error('HitPay API error:', responseData)
       return res.status(response.status).json({ 
@@ -3018,11 +3021,13 @@ app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
     }
 
     // Store payment reference in database
+    console.log(`Creating payment_transactions record for order_id: ${order_id}, payment_id: ${responseData.id}`)
     await pool.query(
       `INSERT INTO payment_transactions (order_id, payment_id, payment_url, amount, currency, status, payment_method, created_at)
        VALUES ($1, $2, $3, $4, 'MYR', 'pending', 'hitpay', NOW())`,
       [order_id, responseData.id, responseData.url, amount]
     )
+    console.log(`payment_transactions record created successfully for order_id: ${order_id}`)
 
     res.json({
       payment_id: responseData.id,
@@ -3038,6 +3043,9 @@ app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
 // HitPay payment callback (webhook)
 app.post('/api/payments/hitpay/callback', async (req, res) => {
   try {
+    // Log raw body to debug
+    console.log('HitPay callback RAW BODY:', JSON.stringify(req.body))
+
     const { payment_id, status, transaction_id } = req.body
 
     console.log('HitPay callback received:', { payment_id, status, transaction_id })
@@ -3057,6 +3065,13 @@ app.post('/api/payments/hitpay/callback', async (req, res) => {
 
     const mappedStatus = statusMap[status?.toLowerCase()] || 'pending'
 
+    // Log unknown status
+    if (!statusMap[status?.toLowerCase()]) {
+      console.log(`Unknown HitPay status received: "${status}" - mapped to "pending"`)
+    }
+
+    console.log(`Processing payment ${payment_id}: HitPay status="${status}" → mapped to "${mappedStatus}"`)
+
     // Update payment transaction
     await pool.query(
       `UPDATE payment_transactions 
@@ -3067,6 +3082,8 @@ app.post('/api/payments/hitpay/callback', async (req, res) => {
 
     // If payment completed, update order payment_status and payment_method
     if (mappedStatus === 'completed') {
+      console.log(`Payment ${payment_id} is completed, looking up order...`)
+
       // First get the order_id from payment_transactions
       const orderResult = await pool.query(
         'SELECT order_id FROM payment_transactions WHERE payment_id = $1',
@@ -3075,8 +3092,10 @@ app.post('/api/payments/hitpay/callback', async (req, res) => {
 
       if (orderResult.rows.length > 0) {
         const order_id = orderResult.rows[0].order_id
+        console.log(`Found order_id: ${order_id}, updating payment status...`)
+
         // Update order with payment_status and payment_method
-        await pool.query(
+        const updateResult = await pool.query(
           `UPDATE orders
            SET payment_status = 'paid',
                payment_method = 'hitpay',
@@ -3084,10 +3103,13 @@ app.post('/api/payments/hitpay/callback', async (req, res) => {
            WHERE id = $1`,
           [order_id]
         )
-        console.log(`Order ${order_id} payment status updated to paid`)
+        console.log(`Order ${order_id} payment status updated to paid. Rows affected: ${updateResult.rowCount}`)
       } else {
         console.error('Order not found for payment_id:', payment_id)
+        console.error('This means payment_transactions record does not exist for this payment_id!')
       }
+    } else {
+      console.log(`Payment ${payment_id} status is "${mappedStatus}" - NOT updating order payment status`)
     }
 
     res.json({ received: true, status: mappedStatus })
