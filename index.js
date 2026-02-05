@@ -2982,7 +2982,7 @@ app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
       currency: 'MYR',
       reference_number: reference_number || `ORD-${order_id}-${Date.now()}`,
       description: description || 'Order Payment',
-      callback_url: `${process.env.API_URL || process.env.FRONTEND_URL || 'http://localhost:5173'}/api/payments/hitpay/callback`,
+      callback_url: `${process.env.API_URL}/api/payments/hitpay/callback`,
       redirect_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment-success?order_id=${order_id}`,
       payment_methods: ['card', 'fpx'], // Cards and FPX (TNG may not be available in sandbox)
     }
