@@ -1313,7 +1313,10 @@ app.get('/api/staff/reservations', authenticateStaffToken, async (req, res) => {
       `SELECT r.*, rest.name as restaurant_name,
               c.first_name || ' ' || c.last_name as customer_name,
               c.email as customer_email,
-              c.phone as customer_phone
+              c.phone as customer_phone,
+              -- Get payment info from the first order (if exists)
+              (SELECT o.payment_status FROM orders o WHERE o.reservation_id = r.id ORDER BY o.id LIMIT 1) as payment_status,
+              (SELECT o.payment_method FROM orders o WHERE o.reservation_id = r.id ORDER BY o.id LIMIT 1) as payment_method
        FROM reservation r
        LEFT JOIN restaurant rest ON rest.id = r.restaurant_id
        LEFT JOIN customer c ON c.id = r.customer_id
