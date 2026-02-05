@@ -1,6 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
+import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import { Pool } from 'pg'
 import bcrypt from 'bcrypt'
@@ -879,8 +880,8 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 
     // Create order
     const orderResult = await pool.query(
-      `INSERT INTO orders (customer_id, reservation_id, restaurant_id, status, notes, total_amount)
-       VALUES ($1, $2, $3, 'pending', $4, $5)
+      `INSERT INTO orders (customer_id, reservation_id, restaurant_id, status, notes, total_amount, payment_status, payment_method)
+       VALUES ($1, $2, $3, 'pending', $4, $5, 'unpaid', NULL)
        RETURNING *`,
       [customer_id, reservation_id, restaurant_id, notes, total]
     )
@@ -2952,7 +2953,299 @@ app.delete('/api/staff/menu/categories/:id', authenticateStaffToken, async (req,
   }
 })
 
-// Start server (for local development only)
+// ============ HITPAY PAYMENT INTEGRATION ============
+// HitPay API credentials from environment variables
+const HITPAY_API_KEY = process.env.HITPAY_API_KEY || 'test_7606027ec751e86efb6ced4661d12ccb88b1146879315ab36e1df43248b87b62'
+const HITPAY_SALT = process.env.HITPAY_SALT || 'Ch9fZjjOD80nCgU2rIH9eE923KIIl7odmUybRf8EU13BnXBfwurFV32ak1YDbuU3'
+const HITPAY_MODE = process.env.HITPAY_MODE || 'sandbox' // 'sandbox' or 'live'
+const HITPAY_BASE_URL = HITPAY_MODE === 'sandbox' 
+  ? 'https://api.sandbox.hit-pay.com/v1/payment-requests'
+  : 'https://api.hit-pay.com/v1/payment-requests'
+
+// Create HitPay payment request
+app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
+  try {
+    const { order_id, amount, customer_name, customer_email, description, reference_number } = req.body
+
+    if (!order_id || !amount || !customer_email) {
+      return res.status(400).json({ error: 'Missing required fields: order_id, amount, customer_email' })
+    }
+
+    // Generate HMAC SHA-256 signature for the request body
+    const timestamp = Date.now().toString()
+    
+    // Prepare payment request payload
+    const paymentData = {
+      email: customer_email,
+      name: customer_name || 'Customer',
+      amount: parseFloat(amount).toFixed(2),
+      currency: 'MYR',
+      reference_number: reference_number || `ORD-${order_id}-${Date.now()}`,
+      description: description || 'Order Payment',
+      callback_url: `${process.env.API_URL || process.env.FRONTEND_URL || 'http://localhost:5173'}/api/payments/hitpay/callback`,
+      redirect_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment-success?order_id=${order_id}`,
+      payment_methods: ['card', 'fpx'], // Cards and FPX (TNG may not be available in sandbox)
+    }
+
+    // Generate signature from request body
+    const signature = crypto
+      .createHmac('sha256', HITPAY_SALT)
+      .update(JSON.stringify(paymentData))
+      .digest('hex')
+
+    console.log('Creating HitPay payment:', paymentData)
+
+    // Make request to HitPay API
+    const response = await fetch(HITPAY_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-BUSINESS-API-KEY': HITPAY_API_KEY,
+        'X-REQUEST-SIGNATURE': signature,
+        'X-REQUEST-TIMESTAMP': timestamp,
+      },
+      body: JSON.stringify(paymentData),
+    })
+
+    const responseData = await response.json()
+
+    if (!response.ok) {
+      console.error('HitPay API error:', responseData)
+      return res.status(response.status).json({ 
+        error: responseData.message || 'Failed to create payment',
+        details: responseData 
+      })
+    }
+
+    // Store payment reference in database
+    await pool.query(
+      `INSERT INTO payment_transactions (order_id, payment_id, payment_url, amount, currency, status, payment_method, created_at)
+       VALUES ($1, $2, $3, $4, 'MYR', 'pending', 'hitpay', NOW())`,
+      [order_id, responseData.id, responseData.url, amount]
+    )
+
+    res.json({
+      payment_id: responseData.id,
+      payment_url: responseData.url,
+      expires_at: responseData.expires_at,
+    })
+  } catch (error) {
+    console.error('HitPay payment creation error:', error)
+    res.status(500).json({ error: 'Failed to create payment' })
+  }
+})
+
+// HitPay payment callback (webhook)
+app.post('/api/payments/hitpay/callback', async (req, res) => {
+  try {
+    const { payment_id, status, transaction_id } = req.body
+
+    console.log('HitPay callback received:', { payment_id, status, transaction_id })
+
+    if (!payment_id) {
+      return res.status(400).json({ error: 'Missing payment_id' })
+    }
+
+    // Map HitPay status to our status
+    const statusMap = {
+      'completed': 'completed',
+      'success': 'completed',
+      'pending': 'pending',
+      'failed': 'failed',
+      'expired': 'expired',
+    }
+
+    const mappedStatus = statusMap[status?.toLowerCase()] || 'pending'
+
+    // Update payment transaction
+    await pool.query(
+      `UPDATE payment_transactions 
+       SET status = $1, transaction_id = $2, updated_at = NOW()
+       WHERE payment_id = $3`,
+      [mappedStatus, transaction_id || null, payment_id]
+    )
+
+    // If payment completed, update order payment_status and payment_method
+    if (mappedStatus === 'completed') {
+      // First get the order_id from payment_transactions
+      const orderResult = await pool.query(
+        'SELECT order_id FROM payment_transactions WHERE payment_id = $1',
+        [payment_id]
+      )
+
+      if (orderResult.rows.length > 0) {
+        const order_id = orderResult.rows[0].order_id
+        // Update order with payment_status and payment_method
+        await pool.query(
+          `UPDATE orders
+           SET payment_status = 'paid',
+               payment_method = 'hitpay',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [order_id]
+        )
+        console.log(`Order ${order_id} payment status updated to paid`)
+      } else {
+        console.error('Order not found for payment_id:', payment_id)
+      }
+    }
+
+    res.json({ received: true, status: mappedStatus })
+  } catch (error) {
+    console.error('HitPay callback error:', error)
+    res.status(500).json({ error: 'Callback processing failed' })
+  }
+})
+
+// Verify HitPay payment status
+app.get('/api/payments/hitpay/status/:payment_id', authenticateToken, async (req, res) => {
+  try {
+    const { payment_id } = req.params
+
+    // Get payment from database
+    const result = await pool.query(
+      'SELECT * FROM payment_transactions WHERE payment_id = $1',
+      [payment_id]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Payment not found' })
+    }
+
+    const dbPayment = result.rows[0]
+
+    // If payment is pending in database, verify with HitPay API
+    if (dbPayment.status === 'pending') {
+      try {
+        const timestamp = Date.now().toString()
+        const signature = crypto
+          .createHmac('sha256', HITPAY_SALT)
+          .update(payment_id)
+          .digest('hex')
+
+        const verifyResponse = await fetch(`${HITPAY_BASE_URL}/${payment_id}`, {
+          method: 'GET',
+          headers: {
+            'X-BUSINESS-API-KEY': HITPAY_API_KEY,
+            'X-REQUEST-SIGNATURE': signature,
+            'X-REQUEST-TIMESTAMP': timestamp,
+          },
+        })
+
+        if (verifyResponse.ok) {
+          const hitpayData = await verifyResponse.json()
+          const newStatus = hitpayData.status?.toLowerCase()
+
+          // Map HitPay status
+          const statusMap = {
+            'completed': 'completed',
+            'success': 'completed',
+            'pending': 'pending',
+            'failed': 'failed',
+            'expired': 'expired',
+          }
+          const mappedStatus = statusMap[newStatus] || 'pending'
+
+          // Update database if status changed
+          if (mappedStatus !== dbPayment.status) {
+            await pool.query(
+              `UPDATE payment_transactions SET status = $1, updated_at = NOW() WHERE payment_id = $2`,
+              [mappedStatus, payment_id]
+            )
+
+            // If payment completed, update order payment status
+            if (mappedStatus === 'completed') {
+              await pool.query(
+                `UPDATE orders SET payment_status = 'paid', payment_method = 'hitpay', updated_at = NOW() WHERE id = $1`,
+                [dbPayment.order_id]
+              )
+              console.log(`✅ Order ${dbPayment.order_id} payment status updated to paid (verified with HitPay)`)
+            }
+          }
+
+          res.json({
+            payment_id: payment_id,
+            status: mappedStatus,
+            amount: hitpayData.amount || dbPayment.amount,
+            transaction_id: hitpayData.transaction_id || dbPayment.transaction_id,
+            verified: true,
+          })
+        } else {
+          // HitPay API error, return database status
+          res.json({
+            payment_id: payment_id,
+            status: dbPayment.status,
+            amount: dbPayment.amount,
+            transaction_id: dbPayment.transaction_id,
+            verified: false,
+          })
+        }
+      } catch (verifyErr) {
+        console.error('Error verifying with HitPay:', verifyErr)
+        // Return database status on error
+        res.json({
+          payment_id: payment_id,
+          status: dbPayment.status,
+          amount: dbPayment.amount,
+          transaction_id: dbPayment.transaction_id,
+          verified: false,
+        })
+      }
+    } else {
+      // Payment already completed or failed
+      res.json({
+        payment_id: payment_id,
+        status: dbPayment.status,
+        amount: dbPayment.amount,
+        transaction_id: dbPayment.transaction_id,
+        verified: false,
+      })
+    }
+  } catch (error) {
+    console.error('HitPay status check error:', error)
+    res.status(500).json({ error: 'Failed to check payment status' })
+  }
+})
+
+// Create payment transaction record
+app.post('/api/payments', authenticateToken, async (req, res) => {
+  try {
+    const { order_id, amount, payment_method, transaction_id, notes } = req.body
+
+    const result = await pool.query(
+      `INSERT INTO payment_transactions (order_id, amount, payment_method, transaction_id, status, notes, created_at)
+       VALUES ($1, $2, $3, $4, 'completed', $5, NOW())
+       RETURNING *`,
+      [order_id, amount, payment_method || 'online', transaction_id, notes]
+    )
+
+    res.json({ message: 'Payment recorded successfully', payment: result.rows[0] })
+  } catch (error) {
+    console.error('Payment creation error:', error)
+    res.status(500).json({ error: 'Failed to record payment' })
+  }
+})
+
+// Get user payments
+app.get('/api/payments', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT pt.*, o.reference_number, o.status as order_status
+       FROM payment_transactions pt
+       JOIN orders o ON pt.order_id = o.id
+       WHERE o.customer_id = $1
+       ORDER BY pt.created_at DESC`,
+      [req.user.id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Get payments error:', error)
+    res.status(500).json({ error: 'Failed to fetch payments' })
+  }
+})
+
+// ============ END HITPAY INTEGRATION ============
 // In Vercel, this file is exported as a handlers
 // Only start server if running locally (not in Vercel)
 if (process.env.VERCEL !== '1') {

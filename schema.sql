@@ -260,6 +260,26 @@ Restaurant Reservation System ER Diagram:
 */
 
 -- ============================================
+-- TABLE: payment_transactions
+-- Stores payment transaction records from HitPay
+-- ============================================
+CREATE TABLE payment_transactions (
+    id SERIAL PRIMARY KEY,
+    order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+    payment_id VARCHAR(100) UNIQUE NOT NULL,
+    reference_number VARCHAR(100),
+    amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(10) DEFAULT 'MYR',
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+    payment_url VARCHAR(500),
+    payment_method VARCHAR(50),
+    customer_email VARCHAR(100),
+    customer_name VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================
 -- COMMON QUERIES
 -- ============================================
 
