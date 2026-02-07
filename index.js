@@ -2984,12 +2984,17 @@ app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
   try {
     const { order_id, amount, customer_name, customer_email, description, reference_number } = req.body
 
+    console.log('Received payment request:', { order_id, amount, customer_email, description, reference_number });
+
     if (!order_id || !amount || !customer_email) {
       return res.status(400).json({ error: 'Missing required fields: order_id, amount, customer_email' })
     }
 
     // Generate HMAC SHA-256 signature for the request body
     const timestamp = Date.now().toString()
+    
+    // Ensure description is not empty
+    const finalDescription = (description && description.trim() !== '') ? description.trim() : `Order #${order_id}`;
     
     // Prepare payment request payload
     const paymentData = {
@@ -2998,7 +3003,7 @@ app.post('/api/payments/hitpay/create', authenticateToken, async (req, res) => {
       amount: parseFloat(amount).toFixed(2),
       currency: 'MYR',
       reference_number: reference_number || `ORD-${order_id}-${Date.now()}`,
-      description: description || 'Order Payment',
+      description: finalDescription,
       callback_url: `${process.env.API_URL}/api/payments/hitpay/callback`,
       redirect_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment-success?order_id=${order_id}`,
       payment_methods: ['card', 'fpx'], // Cards and FPX (TNG may not be available in sandbox)
