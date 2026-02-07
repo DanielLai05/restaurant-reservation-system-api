@@ -2346,6 +2346,7 @@ app.get('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
         r.created_at,
         r.image_url,
         r.max_capacity as capacity,
+        r.is_active,
         COALESCE(reservation_count.reservation_count, 0) as total_reservations,
         COALESCE(order_count.order_count, 0) as total_orders,
         COALESCE(staff_count.staff_count, 0) as total_staff
@@ -2393,8 +2394,8 @@ app.post('/api/admin/restaurants', authenticateAdminToken, async (req, res) => {
     } = req.body
 
     const result = await pool.query(
-      `INSERT INTO restaurant (name, description, address, cuisine_type, email, phone, opening_time, closing_time, max_capacity, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO restaurant (name, description, address, cuisine_type, email, phone, opening_time, closing_time, max_capacity, image_url, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
        RETURNING *`,
       [name, description, location, cuisine, email, phone, opening_time, closing_time, capacity, image_url]
     )
@@ -2425,11 +2426,12 @@ app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) =
       capacity,        // frontend: capacity -> database: max_capacity
       image_url,
       email,
-      phone
+      phone,
+      is_active
     } = req.body
 
-    const result = await pool.query(
-      `UPDATE restaurant 
+    // Handle is_active separately since it's a boolean toggle
+    let updateQuery = `
        SET name = COALESCE($1, name),
            description = COALESCE($2, description),
            address = COALESCE($3, address),
@@ -2440,9 +2442,21 @@ app.put('/api/admin/restaurants/:id', authenticateAdminToken, async (req, res) =
            closing_time = COALESCE($8, closing_time),
            max_capacity = COALESCE($9, max_capacity),
            image_url = COALESCE($10, image_url)
-       WHERE id = $11
-       RETURNING *`,
-      [name, description, location, cuisine, email, phone, opening_time, closing_time, capacity, image_url, id]
+    `
+
+    let queryParams = [name, description, location, cuisine, email, phone, opening_time, closing_time, capacity, image_url]
+
+    if (typeof is_active === 'boolean') {
+      updateQuery += `, is_active = $${queryParams.length + 1}`
+      queryParams.push(is_active)
+    }
+
+    updateQuery += ` WHERE id = $${queryParams.length + 1} RETURNING *`
+    queryParams.push(id)
+
+    const result = await pool.query(
+      `UPDATE restaurant ${updateQuery}`,
+      queryParams
     )
 
     if (result.rows.length === 0) {
